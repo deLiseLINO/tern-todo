@@ -16,25 +16,35 @@ The file must be `{"todos": [...]}`. The block re-reads it every 5 s (not while 
 | Key | Action |
 | --- | --- |
 | j / k, Up / Down | move |
-| Space, x | toggle done |
+| Space, x | toggle done; with two or more tasks selected, mark all done, or not done when all are done. Done closes an idle linked pane; not done reopens a linked omp chat. See below for the safety rules. |
 | Enter | focus the linked pane; else resume the linked omp chat in a new tab; else start the task in omp |
 | Tab, a | add a task (type the title, Enter adds, Esc or Tab leaves the field) |
-| e | edit notes (Enter inserts a newline, Esc leaves) |
-| F2, n | rename the selected task (whole title selected; Enter, Tab or a click elsewhere commits, Esc restores) |
+| e | edit notes (Enter inserts a newline, Tab or a click elsewhere commits, Esc discards the draft) |
+| F2, n | rename the selected task (whole title selected; Enter, Tab or a click elsewhere commits, Esc discards the draft) |
 | p | pick the project (cwd) |
 | r | reload the file |
-| z | archive / restore the selected task |
+| z | archive / restore the selected task; with two or more selected, archive all, or restore all when all are archived |
 | Z | show / hide the Archived section |
-| Delete, Backspace | delete (press twice) |
+| Delete, Backspace | delete task records only (press twice); with two or more selected, delete the whole selection |
+| v | tick / untick the current row |
+| Shift+Up / Shift+Down | extend the selection from the anchor row |
+| Cmd+A / Ctrl+A | select all visible tasks, including archived tasks only when their section is expanded |
+| Esc | cancel a pending delete confirmation or pick-up first; otherwise clear the selection |
 
 Text fields use Tern's native editing (`features = {edit, undo}`): selection, `cmd+a`, `cmd+c`, double-click a word, undo. The block adds typing, `option+backspace`, `cmd+backspace`, `option+arrows`, redo and `ctrl+a` (select all).
+
+`Ctrl+A` selects the whole field even after mouse or Shift-arrow selection and when pressed twice. `Cmd+A` remains Tern's native select-all. Titles and notes save while typing unless the same field changes on disk. A conflict shows `Task changed on disk` once and keeps the local draft visible without overwriting the external edit. Enter, Tab or a click elsewhere explicitly commits a title. Notes keep Enter for a newline; Enter also commits a conflicting draft, while Tab or a click elsewhere commits and leaves notes.
+
+Esc discards a title or notes draft. Without an external edit it restores the value from when editing started; after an external edit it adopts the current disk value without writing. `j/k`, arrows and `g/G` move the cursor without clearing ticks. `e`, `n` / `F2` and `p` do nothing while two or more rows are selected because the task card is hidden.
 
 ## Mouse and reordering
 
 | Input | What it does |
 | --- | --- |
 | Double click on a task row | Selects the row, opens its card and does what Enter / the card's primary button does: focuses the linked pane (the window switches to the tab that holds it), else opens `omp --resume <id>` in a new tab and links the pane, else starts the task in omp (model and thinking from the card, the task as the first prompt). A new tab opened this way is shown at once. |
-| Single click on a row | Selects the row and opens the card (unchanged). |
+| Single click on a row | Clears the multi-selection, selects the row and opens its card. Double click also clears the multi-selection and opens only that row. |
+| Cmd-click / Ctrl-click on a row | Tick / untick it. The first tick also ticks the current row. |
+| Shift-click on a row | Select the range from the anchor row to this row, across groups. The last plain-clicked or Cmd-clicked row sets the anchor. |
 | Click on the status glyph | Unchanged: toggles done for plain tasks, opens or starts for agent states. A double click on the glyph or the grip counts as one click: the second press and the row's double click are ignored. |
 | Grip (six dots, right edge of a row; shown on hover and on the selected row) | Click picks the task up. The row is outlined, rows of the same group show a drop line (above or below the row under the pointer, depending on which side of the picked task it sits), rows of the other group are dimmed. The next click on a row drops the task there. Click the grip again, press Esc or click anything else to cancel. |
 | `Alt+Up` / `Alt+Down` (also `Cmd+Shift+Up` / `Cmd+Shift+Down`) | Moves the selected task one place within its group. Stops at the group's edge. |
@@ -42,6 +52,28 @@ Text fields use Tern's native editing (`features = {edit, undo}`): selection, `c
 | F2, `n`, click on the card title | Rename (unchanged). Double click on a row no longer renames. |
 
 True press-drag-release is not delivered to plugin blocks (Tern sends plugins click, dblclick and menu only), so reordering by mouse is click to pick up, click to put down. It is not drag and drop.
+
+Starting a selection cancels a grip pick-up; picking up a row clears the selection. Ticked rows have an accent tint, a left bar and a checked circle. Their status glyphs do not change.
+
+## Bulk panel
+
+With two or more tasks selected the task card becomes `N tasks selected`, with open, done and archived counts. Its buttons are Archive, Mark done, Delete and Clear. Archive becomes Restore when all selected tasks are archived; Mark done becomes Mark as not done when all are done. Delete first shows `Delete N?` in red; a second press deletes those records only, never their panes or omp sessions. Confirmation expires after 4 seconds and clears on Esc or a selection change.
+
+Bulk archive, restore and delete each use one read-modify-write by task id. Bulk done writes once after the pane close checks finish; reopening chats then writes their new pane links. External edits, unknown keys and explicit nulls survive. IDs that disappear or become hidden leave the selection on the next re-read. In a narrow window the bulk panel sits above the list.
+
+## Done and the pane
+
+Marking a task done from the keyboard, plain-task glyph, card or bulk panel closes its idle linked pane with `tern close <id>`, then clears `links.tern_pane` to null. The omp session and cwd stay linked. Tern has no confirmation or undo for closing a pane, so the pane stays open with `Pane left open (reason)` when:
+
+- The sampled omp state is working or waiting for input.
+- The omp state is unknown, or the foreground job is neither an idle shell nor idle/exited omp. The foreground process is checked with `tern process --json`.
+- The pane hosts this task block, another not-done task shares it, or the process check fails.
+
+A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 2 seconds old; a new job starting between the check and close is not protected by that earlier check.
+
+Marking a task not done reopens its omp chat in a new tab with `omp --resume <id>` in the task cwd when it has a session but no live pane. A task without a session just becomes open; it does not start an agent. Repeated toggles are ignored while that task's close or reopen is in flight.
+
+Start links the exact saved omp session reported by the new pane, not the newest chat in the project directory. If no saved session is reported within about 20 seconds, the pane remains linked and the chat ID stays unset.
 
 ## Order model
 

@@ -118,6 +118,7 @@
 		border-radius: 16px;
 		cursor: pointer;
 		color: var(--tp-ink);
+		user-select: none;
 	}
 
 	& [data-role='todo-proto.row']:hover {
@@ -391,6 +392,65 @@
 
 	& [data-role='todo-proto.hbtn'][data-confirm='true']:hover {
 		background-color: #f06a66;
+	}
+
+	/* A ticked row (multi-selection): accent tint and bar plus a checked circle at the right; the
+	   status glyph is left alone. The cursor row alone keeps the plain grey selection. */
+	& [data-role='todo-proto.row'][data-multi='true'] {
+		background: rgb(from var(--accent) r g b / 14%);
+		box-shadow: inset 3px 0 0 var(--accent);
+	}
+
+	& [data-role='todo-proto.row'][data-multi='true']:hover {
+		background: rgb(from var(--accent) r g b / 20%);
+	}
+
+	& [data-role='todo-proto.row'][data-multi='true'][data-state='selected'] {
+		box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px rgb(from var(--accent) r g b / 55%);
+	}
+
+	& [data-role='todo-proto.tick'] {
+		flex: none;
+		width: 18px;
+		height: 18px;
+		border-radius: 50%;
+		background-color: var(--accent);
+		background-size: 14px 14px;
+		background-repeat: no-repeat;
+		background-position: center;
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.2 8.3l2.5 2.5 5-5.2' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+	}
+
+	& [data-role='todo-proto.bulk-title'] {
+		font-size: 18px;
+		font-weight: 600;
+		line-height: 1.35;
+		color: var(--tp-ink);
+	}
+
+	& [data-role='todo-proto.bulk-sub'] {
+		font-size: 13px;
+		color: var(--tp-mute);
+		margin-top: -6px;
+	}
+
+	& [data-role='todo-proto.bulk-buttons'] {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
+		gap: 10px;
+		margin-top: 8px;
+	}
+
+	& [data-role='todo-proto.pill'][data-confirm='true'] {
+		background: #ec5b57;
+		color: #fff;
+		font-weight: 600;
+	}
+
+	& [data-role='todo-proto.pill'][data-confirm='true']:hover {
+		background: #f06a66;
+		color: #fff;
 	}
 
 	& [data-role='todo-proto.row'][data-archived='true'] {
@@ -719,6 +779,15 @@
 		padding: 24px 14px 12px;
 	}
 
+	/* Narrow: the bulk panel goes above the list, where its buttons stay in view. */
+	.sf-main[data-surface='plugin.todo-proto.list'] [data-role='todo-proto.detail'][data-bulk='true'] {
+		order: -1;
+		flex: 1 1 100%;
+		max-width: none;
+		padding: 14px 16px;
+		gap: 8px;
+	}
+
 	.sf-dock[data-surface='plugin.todo-proto.list'] {
 		padding: 6px 14px 10px;
 	}
@@ -769,6 +838,8 @@
 
 	& [data-role='todo-proto.pickq'] {
 		position: absolute;
+		z-index: 2;
+		pointer-events: auto;
 		top: 88px;
 		left: calc(max(24px, 50% - 340px) + 144px);
 		right: calc(max(24px, 50% - 340px) + 30px);

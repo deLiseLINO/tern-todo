@@ -10,8 +10,14 @@
 -- cmd+shift+Up / Down) move the selected task one place within its group. Double-clicking a
 -- row selects it, opens its card and does what Enter does. The grip at the right of a row
 -- picks the task up; the next click on a row drops it there (Esc or the grip again cancels).
+-- Done closes the pane: marking a task done (x / space, the glyph, the card button or the bulk
+-- button) closes its linked pane with `tern close` unless the agent is working or needs you, or
+-- a command runs in it; the link is then cleared. Marking it not done again reopens its omp
+-- chat (`omp --resume`) when it has a session. Several tasks can be selected (cmd/ctrl-click
+-- toggles a row, shift-click a range; shift+Up/Down, v, cmd/ctrl+A, Esc) and archived, deleted or
+-- marked done together from the bulk panel (z, Delete and x act on the whole selection too).
 -- Keys (field focused): typing edits the field, Enter adds the task (add row), saves the
--- title or inserts a newline (notes), Esc or Tab leaves the field (Esc restores a title).
+-- title or inserts a newline (notes), Tab commits; Esc discards title/notes drafts.
 --
 -- Fields are natively edited: the block opts into `features = {"edit", "undo"}`, so Tern
 -- keeps the selection (shift-arrows, drag, double/triple click, cmd+a) and sends edits as
@@ -19,6 +25,7 @@
 -- keys Tern leaves to the program (typing, deletes, word moves, ctrl+a, redo).
 
 local ui = tern.ui
+local session = require("./session")
 
 local POLL_MS = 5 * 1000
 local TERN = "/Users/delise/.local/bin/tern"
@@ -136,10 +143,6 @@ type State = {
 	-- Drafts of the focused detail fields, valid while focus == "title" / "notes".
 	notes: Field,
 	title: Field,
-	-- The task being renamed and its title when the rename started (Esc and an empty title
-	-- restore it).
-	title_id: string?,
-	title_orig: string,
 	pick: Pick?,
 	-- Models from `omp models --json`, loaded once per block run.
 	models: { Model }?,
@@ -174,6 +177,13 @@ type State = {
 	tap: { key: string, at: number }?,
 	-- Tasks whose `tern new tab` is still running, so a repeated double click starts one tab.
 	launching: { [string]: boolean },
+	-- Multi-selection (view state only, never saved): the ticked ids, the row a shift range
+	-- starts at, whether Delete awaits its second press for the whole selection, and the
+	-- tasks whose done toggle (pane close) is in flight.
+	sel: { [string]: boolean },
+	anchor: string?,
+	confirm_bulk: boolean,
+	closing: { [string]: boolean },
 }
 
 -- A pane ID survives Restart; the state object identifies this block run.
@@ -183,6 +193,7 @@ local CONFIRM_MS = 4000
 
 local function clear_confirm(state: State)
 	state.confirm = nil
+	state.confirm_bulk = false
 	if state.confirm_timer then
 		state.confirm_timer:cancel()
 		state.confirm_timer = nil
@@ -298,6 +309,30 @@ local function ensure_cursor(state: State)
 	state.cursor = if shown[1] then shown[1].id else nil
 end
 
+-- Drops selected ids that are no longer listed (gone from the file, or in a collapsed section).
+local function prune_sel(state: State)
+	if next(state.sel) == nil and state.anchor == nil then
+		return
+	end
+	local visible: { [string]: boolean } = {}
+	for _, t in ordered(state.todos, state.arch_open) do
+		visible[t.id] = true
+	end
+	local changed = false
+	for id in state.sel do
+		if not visible[id] then
+			state.sel[id] = nil
+			changed = true
+		end
+	end
+	if state.anchor and not visible[state.anchor] then
+		state.anchor = nil
+	end
+	if changed then
+		clear_confirm(state)
+	end
+end
+
 local function load(state: State)
 	local path = state.path
 	if not path then
@@ -316,6 +351,7 @@ local function load(state: State)
 	state.error = nil
 	state.todos = todos
 	ensure_cursor(state)
+	prune_sel(state)
 end
 
 -- Replaces every `: null` outside a string by a marker string and back after decoding:
@@ -368,7 +404,7 @@ end
 -- as explicit nulls (`due` is kept as it is, null when unset;
 -- `agent` is optional and only filled in where a task has one).
 -- Returns whether the file was written.
-local function rewrite(state: State, change: ({ any }) -> ()): boolean
+local function rewrite(state: State, change: ({ any }) -> boolean?): boolean
 	local path = state.path
 	if not path then
 		return false
@@ -385,7 +421,10 @@ local function rewrite(state: State, change: ({ any }) -> ()): boolean
 	end
 	data = restore_nulls(data)
 	local list = tern.json.array(data.todos)
-	change(list)
+	if change(list) == false then
+		load(state)
+		return false
+	end
 	for _, item in list do
 		if type(item) == "table" then
 			if item.due == nil then
@@ -427,12 +466,6 @@ local function patch(state: State, id: string, change: (any) -> ())
 	end)
 end
 
-local function toggle(state: State, id: string)
-	patch(state, id, function(item)
-		item.done = not (item.done == true)
-	end)
-end
-
 local function add_task(state: State, title: string)
 	local new_id = ""
 	local written = rewrite(state, function(list)
@@ -459,6 +492,8 @@ local function add_task(state: State, title: string)
 	end)
 	if written then
 		state.cursor = new_id
+		state.sel = {}
+		state.anchor = nil
 		state.detail_open = true
 	end
 end
@@ -476,6 +511,136 @@ local function selected(state: State): Todo?
 	return ordered(state.todos, state.arch_open)[index_of(state)]
 end
 
+local function todo_by_id(state: State, id: string): Todo?
+	for _, t in state.todos do
+		if t.id == id then
+			return t
+		end
+	end
+	return nil
+end
+
+local function clear_sel(state: State)
+	state.sel = {}
+	clear_confirm(state)
+end
+
+-- The ids of a multi-selection (two or more rows), in list order; empty otherwise.
+local function multi_ids(state: State): { string }
+	local out: { string } = {}
+	if next(state.sel) == nil then
+		return out
+	end
+	for _, t in ordered(state.todos, state.arch_open) do
+		if state.sel[t.id] then
+			table.insert(out, t.id)
+		end
+	end
+	if #out < 2 then
+		return {}
+	end
+	return out
+end
+
+-- Selects the visible rows from the anchor (else the cursor) to `to`, ends included.
+local function select_range(state: State, to: string)
+	local shown = ordered(state.todos, state.arch_open)
+	if not state.anchor then
+		state.anchor = state.cursor
+	end
+	local a, b = 0, 0
+	for i, t in shown do
+		if t.id == state.anchor then
+			a = i
+		end
+		if t.id == to then
+			b = i
+		end
+	end
+	if b == 0 then
+		return
+	end
+	if a == 0 then
+		a = b
+	end
+	if a > b then
+		a, b = b, a
+	end
+	local sel: { [string]: boolean } = {}
+	for i = a, b do
+		sel[shown[i].id] = true
+	end
+	state.sel = sel
+	clear_confirm(state)
+end
+
+-- Cmd/ctrl-click and `v`: ticks or unticks one row. The first tick also ticks the cursor row.
+local function toggle_mark(state: State, id: string)
+	if next(state.sel) == nil and state.cursor and state.cursor ~= id then
+		state.sel[state.cursor] = true
+	end
+	if state.sel[id] then
+		state.sel[id] = nil
+	else
+		state.sel[id] = true
+	end
+	state.anchor = id
+	state.cursor = id
+	state.detail_open = true
+	state.lift = nil
+	clear_confirm(state)
+end
+
+-- Shift+Up / Shift+Down: moves the cursor and selects from the anchor to it.
+local function extend(state: State, delta: number)
+	local shown = ordered(state.todos, state.arch_open)
+	local t = shown[math.clamp(index_of(state) + delta, 1, math.max(1, #shown))]
+	if not t then
+		return
+	end
+	state.lift = nil
+	if not state.anchor then
+		state.anchor = state.cursor
+	end
+	state.cursor = t.id
+	state.detail_open = true
+	select_range(state, t.id)
+end
+
+local function select_all(state: State)
+	local sel: { [string]: boolean } = {}
+	for _, t in ordered(state.todos, state.arch_open) do
+		sel[t.id] = true
+	end
+	state.lift = nil
+	state.sel = sel
+	state.anchor = state.cursor
+	clear_confirm(state)
+end
+
+-- The row to put the cursor on once the rows in `gone` leave: the next one not in it, else the
+-- previous one.
+local function survivor(state: State, gone: { [string]: boolean }): string?
+	local shown = ordered(state.todos, state.arch_open)
+	local last = 0
+	for i, t in shown do
+		if gone[t.id] then
+			last = i
+		end
+	end
+	for i = last + 1, #shown do
+		if not gone[shown[i].id] then
+			return shown[i].id
+		end
+	end
+	for i = last - 1, 1, -1 do
+		if not gone[shown[i].id] then
+			return shown[i].id
+		end
+	end
+	return nil
+end
+
 local function move(state: State, to: number)
 	local shown = ordered(state.todos, state.arch_open)
 	local t = shown[math.clamp(to, 1, math.max(1, #shown))]
@@ -484,6 +649,7 @@ local function move(state: State, to: number)
 			clear_confirm(state)
 		end
 		state.cursor = t.id
+		state.anchor = t.id
 		state.detail_open = true
 	end
 end
@@ -513,8 +679,43 @@ local function neighbour(state: State, id: string): string?
 	return if other then other.id else nil
 end
 
+-- Archives the selected tasks, or restores them when all of them are archived (one write).
+local function bulk_archive(state: State, ids: { string })
+	local set: { [string]: boolean } = {}
+	local all_archived = true
+	for _, id in ids do
+		set[id] = true
+		local t = todo_by_id(state, id)
+		if t and not t.archived then
+			all_archived = false
+		end
+	end
+	local target = not all_archived
+	local after = survivor(state, set)
+	clear_confirm(state)
+	local written = rewrite(state, function(list)
+		for _, item in list do
+			if type(item) == "table" and set[item.id] then
+				item.archived = if target then true else nil
+			end
+		end
+	end)
+	if written then
+		state.sel = {}
+		state.anchor = nil
+		state.cursor = after or state.cursor
+		ensure_cursor(state)
+		state.cx:toast("info", (if target then "Archived " else "Restored ") .. #ids .. " tasks")
+	end
+end
+
 -- Archive keeps the record, its links and any running agent untouched; Restore drops the key.
 local function archive_toggle(state: State, t: Todo)
+	local ids = multi_ids(state)
+	if #ids >= 2 then
+		bulk_archive(state, ids)
+		return
+	end
 	local target = not t.archived
 	local after = neighbour(state, t.id)
 	clear_confirm(state)
@@ -533,6 +734,44 @@ end
 
 -- First press arms the confirmation, the second removes the record (never a pane or session).
 local function delete_press(state: State)
+	local ids = multi_ids(state)
+	if #ids >= 2 then
+		if not state.confirm_bulk then
+			clear_confirm(state)
+			state.confirm_bulk = true
+			state.confirm_timer = tern.timer(CONFIRM_MS, function()
+				state.confirm_timer = nil
+				if alive(state) and state.confirm_bulk then
+					state.confirm_bulk = false
+					state.cx:render()
+				end
+			end)
+			return
+		end
+		local set: { [string]: boolean } = {}
+		for _, id in ids do
+			set[id] = true
+		end
+		local after = survivor(state, set)
+		clear_confirm(state)
+		-- Only the records go; panes and omp sessions are never touched.
+		local written = rewrite(state, function(list)
+			for i = #list, 1, -1 do
+				local item = list[i]
+				if type(item) == "table" and set[item.id] then
+					table.remove(list, i)
+				end
+			end
+		end)
+		if written then
+			state.sel = {}
+			state.anchor = nil
+			state.cursor = after or state.cursor
+			ensure_cursor(state)
+			state.cx:toast("info", "Deleted " .. #ids .. " tasks")
+		end
+		return
+	end
 	local t = selected(state)
 	if not t then
 		return
@@ -573,6 +812,7 @@ local function toggle_archived(state: State)
 	state.arch_open = not state.arch_open
 	clear_confirm(state)
 	ensure_cursor(state)
+	prune_sel(state)
 end
 
 -- Reorder -------------------------------------------------------------------
@@ -924,53 +1164,68 @@ local function load_models(state: State)
 	end
 end
 
--- Finds the id of the chat a freshly started omp creates: omp has no flag to choose a
--- session id, so look for a new file in the project's bucket every few seconds.
-local function discover_session(state: State, task_id: string, cwd: string, since: number, attempt: number)
-	if attempt > 12 then
+-- omp reports its exact session file on the pane. Retry briefly while it starts;
+-- never infer ownership from another session's cwd or modification time.
+local function discover_session(state: State, task_id: string, pane: number, deadline: number)
+	if tern.now() >= deadline then
 		return
 	end
-	tern.timer(5000, function()
+	tern.timer(1500, function()
 		if not alive(state) then
 			return
 		end
-		local ok = pcall(
-			tern.process.run,
-			{ "/usr/bin/find", sessions_root() .. "/" .. bucket_of(cwd), "-maxdepth", "1", "-name", "*.jsonl", "-exec", "/usr/bin/stat", "-f", "%m %N", "{}", "+" },
-			{ timeout_ms = 3000 },
-			function(found: ProcessResult, _)
+		local function retry()
+			discover_session(state, task_id, pane, deadline)
+		end
+		local ok = pcall(tern.process.run, { TERN, "inspect", "--json" }, { timeout_ms = 3000 }, function(found: ProcessResult, _)
+			if not alive(state) then
+				return
+			end
+			local dok, doc = pcall(tern.json.decode, found.stdout)
+			local file: string? = nil
+			if found.status == 0 and dok and type(doc) == "table" and type(doc.panes) == "table" then
+				for _, p in doc.panes do
+					if type(p) == "table" and p.pane == pane and type(p.omp_session_file) == "string" then
+						file = p.omp_session_file
+					end
+				end
+			end
+			local file_id = if file then string.match(file, "_([%w%-]+)%.jsonl$") else nil
+			if not file_id then
+				retry()
+				return
+			end
+			local hok = pcall(tern.process.run, { "/usr/bin/head", "-n", "2", "--", file :: string }, { timeout_ms = 3000 }, function(head: ProcessResult, _)
 				if not alive(state) then
 					return
 				end
-				local used: { [string]: boolean } = {}
-				local target: Todo? = nil
-				for _, t in state.todos do
-					if t.links.omp_session then
-						used[t.links.omp_session] = true
-					end
-					if t.id == task_id then
-						target = t
-					end
-				end
-				if not target or target.links.omp_session then
+				local _, id = session.read_head(head.stdout)
+				if head.status ~= 0 or id ~= file_id then
+					retry()
 					return
 				end
-				for _, f in parse_stat(found.stdout) do
-					if f.mtime >= since - 2 and not used[f.id] then
-						patch(state, task_id, function(item)
+				rewrite(state, function(list)
+					for _, item in list do
+						if type(item) == "table" and item.id == task_id then
 							local links = if type(item.links) == "table" then item.links else {}
-							links.omp_session = f.id
+							if links.tern_pane ~= pane or (type(links.omp_session) == "string" and links.omp_session ~= "") then
+								return false
+							end
+							links.omp_session = id
 							item.links = links
-						end)
-						state.cx:render()
-						return
+							return true
+						end
 					end
-				end
-				discover_session(state, task_id, cwd, since, attempt + 1)
+					return false
+				end)
+				state.cx:render()
+			end)
+			if not hok then
+				retry()
 			end
-		)
+		end)
 		if not ok then
-			discover_session(state, task_id, cwd, since, attempt + 1)
+			retry()
 		end
 	end)
 end
@@ -999,7 +1254,6 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 	for _, a in argv do
 		table.insert(cmd, a)
 	end
-	local since = os.time()
 	local id = t.id
 	state.launching[id] = true
 	local ok, err = pcall(tern.process.run, cmd, { timeout_ms = 10000 }, function(result: ProcessResult, _)
@@ -1031,7 +1285,7 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 		state.launched[pane] = os.time()
 		state.cx:render()
 		if find_session then
-			discover_session(state, id, cwd, since, 1)
+			discover_session(state, id, pane, tern.now() + 20000)
 		end
 	end)
 	if not ok then
@@ -1137,7 +1391,12 @@ local function update_states(state: State): boolean
 			end
 		end
 	end
-	local sig = tern.json.encode({ states, debug })
+	local panes: { number } = {}
+	for pane in live_panes() do
+		table.insert(panes, pane)
+	end
+	table.sort(panes)
+	local sig = tern.json.encode({ states, debug, panes })
 	if sig == state.states_sig then
 		return false
 	end
@@ -1255,6 +1514,309 @@ local function activate(state: State, t: Todo)
 		end
 		table.insert(argv, prompt)
 		launch(state, t, argv, true)
+	end
+end
+
+-- Done and the pane -----------------------------------------------------
+
+local SHELLS: { [string]: boolean } = {
+	fish = true, bash = true, zsh = true, sh = true, dash = true, ksh = true,
+	tcsh = true, csh = true, nu = true, xonsh = true, elvish = true,
+}
+
+local function exe_name(v: any): string
+	local s = tostring(v or "")
+	local base = string.match(s, "([^/]+)$") or s
+	return (string.gsub(base, "^%-", ""))
+end
+
+local function proc_argv(proc: any): { any }
+	return if type(proc) == "table" and type(proc.argv) == "table" then proc.argv else {}
+end
+
+local function is_shell(proc: any): boolean
+	return type(proc) == "table" and SHELLS[exe_name(proc_argv(proc)[1] or proc.name)] == true
+end
+
+local function is_omp(proc: any): boolean
+	if type(proc) ~= "table" then
+		return false
+	end
+	local argv = proc_argv(proc)
+	return exe_name(argv[1]) == "omp" or exe_name(proc.name) == "omp" or exe_name(argv[2]) == "omp"
+end
+
+-- Why the pane must stay open, or nil when closing it is safe. `stdout` is `tern process
+-- --json PANE`: the pane may close when its foreground job is the shell (idle), or omp whose
+-- sampled state is idle/exited; never while omp works or waits for the user, nor with any other
+-- foreground job (tern has no confirm and no undo for a closed pane).
+local function keep_reason(state: State, pane: number, stdout: string): string?
+	local key = tostring(pane)
+	local word = state.debug_states[key] or state.agent_states[key]
+	if word == "working" or word == "running" then
+		return "agent is working"
+	elseif word == "waiting_input" or word == "needs" then
+		return "needs you"
+	end
+	local ok, data = pcall(tern.json.decode, stdout)
+	if not ok or type(data) ~= "table" then
+		return "cannot inspect it"
+	end
+	local job = if type(data.foreground) == "table" then data.foreground else data.child
+	if is_shell(job) then
+		return nil
+	elseif is_omp(job) then
+		if word == "idle" or word == "review" or word == "exited" or word == "stopped" then
+			return nil
+		end
+		return "agent state unknown"
+	end
+	return "running a command"
+end
+
+local function busy(state: State, id: string): boolean
+	return state.closing[id] == true or state.launching[id] == true
+end
+
+local function plural(n: number, noun: string): string
+	return n .. " " .. noun .. (if n == 1 then "" else "s")
+end
+
+-- Sets `done` on the tasks `ids` (those that differ), in ONE file write.
+-- Going done closes each live linked pane when it is safe (keep_reason) and clears the link;
+-- going open reopens the omp chat of a task that has a session and no live pane. A task
+-- whose close or reopen is in flight ignores a second toggle.
+local function set_done(state: State, ids: { string }, to: boolean)
+	local want: { string } = {}
+	local set: { [string]: boolean } = {}
+	for _, id in ids do
+		local t = todo_by_id(state, id)
+		if t and t.done ~= to and not busy(state, id) and not set[id] then
+			table.insert(want, id)
+			set[id] = true
+		end
+	end
+	if #want == 0 then
+		return
+	end
+	local bulk = #ids > 1
+
+	if not to then
+		local written = rewrite(state, function(list)
+			for _, item in list do
+				if type(item) == "table" and set[item.id] then
+					item.done = false
+				end
+			end
+		end)
+		if written then
+			local opened = 0
+			for _, id in want do
+				local t = todo_by_id(state, id)
+				if t and t.links.omp_session and not live_pane_of(t) then
+					opened += 1
+					launch(state, t, { omp_bin(), "--resume", t.links.omp_session }, false)
+				end
+			end
+			if bulk then
+				state.cx:toast("info", "Marked " .. #want .. " not done" .. (if opened > 0 then ", reopening " .. plural(opened, "chat") else ""))
+			end
+		end
+		return
+	end
+
+	local function write_done(closed: { [string]: number }): boolean
+		return rewrite(state, function(list)
+			for _, item in list do
+				if type(item) == "table" and type(item.id) == "string" and set[item.id] then
+					item.done = true
+					local pane = closed[item.id]
+					if pane and type(item.links) == "table" and tonumber(item.links.tern_pane) == pane then
+						item.links.tern_pane = nil
+					end
+				end
+			end
+		end)
+	end
+
+	-- One entry per live pane; tasks sharing a pane follow its verdict.
+	local live = live_panes()
+	local groups: { { pane: number, ids: { string } } } = {}
+	for _, id in want do
+		local t = todo_by_id(state, id) :: Todo
+		local pane = t.links.tern_pane
+		if pane and live[pane] then
+			local found = false
+			for _, g in groups do
+				if g.pane == pane then
+					table.insert(g.ids, id)
+					found = true
+				end
+			end
+			if not found then
+				table.insert(groups, { pane = pane, ids = { id } })
+			end
+		end
+	end
+	if #groups == 0 then
+		if write_done({}) and bulk then
+			state.cx:toast("info", "Marked " .. #want .. " done")
+		end
+		return
+	end
+
+	for _, id in want do
+		state.closing[id] = true
+	end
+	local closed: { [string]: number } = {}
+	local closed_panes, left_panes = 0, 0
+	local why: { string } = {}
+	local function finish()
+		for _, id in want do
+			state.closing[id] = nil
+		end
+		for _, g in groups do
+			local key = tostring(g.pane)
+			if closed[g.ids[1]] then
+				state.agent_states[key] = nil
+				state.since[g.pane] = nil
+				state.launched[g.pane] = nil
+			end
+		end
+		local written = write_done(closed)
+		if written and #why > 0 and not bulk then
+			state.cx:toast("info", "Pane left open (" .. why[1] .. ")")
+		elseif written and bulk then
+			local parts: { string } = {}
+			if closed_panes > 0 then
+				table.insert(parts, "Closed " .. plural(closed_panes, "pane"))
+			end
+			if left_panes > 0 then
+				table.insert(parts, (if closed_panes > 0 then "left " else "Left ") .. left_panes .. " open")
+			end
+			if #parts == 0 then
+				parts = { "Marked " .. #want .. " done" }
+			end
+			state.cx:toast("info", table.concat(parts, ", "), if #why > 0 then table.concat(why, "; ") else nil)
+		end
+		if alive(state) then
+			state.cx:render()
+		end
+	end
+
+	local function leave(reason: string)
+		left_panes += 1
+		if not table.find(why, reason) then
+			table.insert(why, reason)
+		end
+	end
+
+	local function close_phase(candidates: { { pane: number, ids: { string } } })
+		local pending = #candidates
+		if pending == 0 then
+			finish()
+			return
+		end
+		for _, g in candidates do
+			local function settle()
+				pending -= 1
+				if pending == 0 then
+					finish()
+				end
+			end
+			local ok = pcall(tern.process.run, { TERN, "close", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+				if result.status == 0 then
+					closed_panes += 1
+					for _, id in g.ids do
+						closed[id] = g.pane
+					end
+				else
+					leave("close failed")
+					state.cx:toast("error", "tern close failed", string.match(result.stderr, "[^\n]+") or ("exit " .. result.status))
+				end
+				settle()
+			end)
+			if not ok then
+				leave("cannot run tern")
+				settle()
+			end
+		end
+	end
+
+	local candidates: { { pane: number, ids: { string } } } = {}
+	local probing = #groups
+	local function probed()
+		probing -= 1
+		if probing == 0 then
+			close_phase(candidates)
+		end
+	end
+	for _, g in groups do
+		local reason: string? = nil
+		if g.pane == state.cx.pane then
+			reason = "this is the todo pane"
+		else
+			for _, other in state.todos do
+				if other.links.tern_pane == g.pane and not set[other.id] and not other.done then
+					reason = "shared with another task"
+				end
+			end
+		end
+		if reason then
+			leave(reason)
+			probed()
+		else
+			local ok = pcall(tern.process.run, { TERN, "process", "--json", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+				local why_not = if result.status ~= 0 then "cannot inspect it" else keep_reason(state, g.pane, result.stdout)
+				if why_not then
+					leave(why_not)
+				else
+					table.insert(candidates, g)
+				end
+				probed()
+			end)
+			if not ok then
+				leave("cannot run tern")
+				probed()
+			end
+		end
+	end
+end
+
+local function toggle_done(state: State, id: string)
+	local t = todo_by_id(state, id)
+	if t then
+		set_done(state, { id }, not t.done)
+	end
+end
+
+-- Mark done for the whole selection, or not done when every selected task is done.
+local function bulk_done(state: State, ids: { string })
+	local all_done = true
+	for _, id in ids do
+		local t = todo_by_id(state, id)
+		if t and not t.done then
+			all_done = false
+		end
+	end
+	set_done(state, ids, not all_done)
+end
+
+local function bulk_action(state: State, which: string?)
+	if which == "clear" then
+		clear_sel(state)
+		return
+	end
+	local ids = multi_ids(state)
+	if #ids < 2 then
+		return
+	end
+	if which == "archive" then
+		bulk_archive(state, ids)
+	elseif which == "done" then
+		bulk_done(state, ids)
+	elseif which == "delete" then
+		delete_press(state)
 	end
 end
 
@@ -1405,12 +1967,18 @@ type Field = {
 	text: string,
 	cur: number,
 	anchor: number?,
+	id: string?,
+	rev: number,
 	undo: { Snap },
 	redo: { Snap },
 	-- The last change was typing, so the next typed character joins its undo step.
 	typing: boolean,
 	multiline: boolean,
 	max: number?,
+	task: string?,
+	base: string,
+	saved: string,
+	conflict: boolean,
 }
 
 local HISTORY = 200
@@ -1418,10 +1986,12 @@ local HISTORY = 200
 local function reset_field(f: Field, text: string)
 	f.text, f.cur, f.anchor = text, length_of(text), nil
 	f.undo, f.redo, f.typing = {}, {}, false
+	f.base, f.saved, f.conflict, f.task = text, text, false, nil
+	f.rev += 1
 end
 
 local function new_field(text: string, multiline: boolean, max: number?): Field
-	local f: Field = { text = "", cur = 0, anchor = nil, undo = {}, redo = {}, typing = false, multiline = multiline, max = max }
+	local f: Field = { text = "", cur = 0, anchor = nil, rev = 0, base = "", saved = "", conflict = false, undo = {}, redo = {}, typing = false, multiline = multiline, max = max }
 	reset_field(f, text)
 	return f
 end
@@ -1531,9 +2101,13 @@ local function edit_key(f: Field, key: Key, cx: BlockCx): string?
 		end
 		return if replace(f, lo, hi, { "\n" }, false) then "text" else "caret"
 	elseif mod and not key.alt and name == "a" and not key.shift then
-		-- cmd+a is Tern's own on a non-empty field; ctrl+a is the select-all the user asked
-		-- for (it is not readline's line start here).
+		-- A fresh node key drops Tern's retained native range before block select-all.
 		f.anchor, f.cur, f.typing = 0, n, false
+		f.rev += 1
+		if f.id then
+			f.id = string.gsub(f.id, "_%d+$", "_" .. f.rev)
+			cx:frame({ { "focus", f.id } })
+		end
 		return "caret"
 	elseif mod and not key.alt and name == "z" then
 		return if undo_step(f, key.shift) then "text" else nil
@@ -1613,22 +2187,57 @@ local function edit_key(f: Field, key: Key, cx: BlockCx): string?
 	return nil
 end
 
-local function set_focus(state: State, field: string?)
-	local t = selected(state)
-	if state.focus == "title" and field ~= "title" then
-		-- Leaving the title commits it; a title left empty is rejected and the old one restored.
-		local id = state.title_id
-		state.title_id = nil
-		if id and trim(state.title.text) == "" then
-			for _, todo in state.todos do
-				if todo.id == id and todo.title ~= state.title_orig then
-					patch(state, id, function(item)
-						item.title = state.title_orig
-					end)
-				end
-			end
-		end
+-- The last value we wrote is the base version for the next live save. `base` stays
+-- the edit-start value for Esc. Re-read inside rewrite, never from the sampled view.
+local function save_field(state: State, f: Field, name: string, mode: string)
+	local id = f.task
+	if not id then
+		return
 	end
+	local draft = if name == "title" then trim(f.text) else f.text
+	local cancel = mode == "cancel" or (name == "title" and mode == "commit" and draft == "")
+	rewrite(state, function(list)
+		for _, item in list do
+			if type(item) ~= "table" or item.id ~= id then
+				continue
+			end
+			local disk = tostring(item[name] or "")
+			if cancel then
+				local value = if not f.conflict and disk == f.saved then f.base else disk
+				reset_field(f, value)
+				if value == disk then
+					return false
+				end
+				item[name] = value
+				return true
+			end
+			if disk ~= f.base and disk ~= f.saved and disk ~= draft and not f.conflict then
+				f.conflict = true
+				state.cx:toast("warning", "Task changed on disk")
+			end
+			if mode == "live" and (f.conflict or (name == "title" and draft == "")) then
+				return false
+			end
+			if disk == draft then
+				f.saved = draft
+				return false
+			end
+			item[name], f.saved = draft, draft
+			return true
+		end
+		return false
+	end)
+end
+
+local function set_focus(state: State, field: string?)
+	if state.focus == "title" and field ~= "title" then
+		save_field(state, state.title, "title", "commit")
+		state.title.task = nil
+	elseif state.focus == "notes" and field ~= "notes" then
+		save_field(state, state.notes, "notes", "commit")
+		state.notes.task = nil
+	end
+	local t = selected(state)
 	if field == "notes" then
 		if not t then
 			return
@@ -1636,6 +2245,7 @@ local function set_focus(state: State, field: string?)
 		state.detail_open = true
 		if state.focus ~= "notes" then
 			reset_field(state.notes, t.notes)
+			state.notes.task = t.id
 		end
 	elseif field == "title" then
 		if not t then
@@ -1644,52 +2254,21 @@ local function set_focus(state: State, field: string?)
 		state.detail_open = true
 		if state.focus ~= "title" then
 			reset_field(state.title, t.title)
-			state.title_id, state.title_orig = t.id, t.title
+			state.title.task = t.id
 		end
 	end
 	state.focus = field
 	local id: any = tern.json.null
 	if field == "add" then
-		id = "main.ws.left.add.field"
+		id = "main.ws.left.add.field_" .. state.add.rev
 	elseif field == "notes" then
-		id = "main.ws.detail.notes"
+		id = "main.ws.detail.notes_" .. state.notes.rev
 	elseif field == "title" then
-		id = "main.ws.detail.head.title"
+		id = "main.ws.detail.head.title_" .. state.title.rev
 	elseif field == "picker" and state.pick and SEARCH[state.pick.kind] then
-		id = "layer.q"
+		id = "layer.q_" .. state.pick.q.rev
 	end
 	state.cx:frame({ { "focus", id } })
-end
-
--- Writes the title being typed to the file as it changes; an empty draft is not written
--- (the commit on leaving restores the old title).
-local function save_title(state: State)
-	local id = state.title_id
-	local title = trim(state.title.text)
-	if not id or title == "" then
-		return
-	end
-	for _, todo in state.todos do
-		if todo.id == id and todo.title ~= title then
-			patch(state, id, function(item)
-				item.title = title
-			end)
-		end
-	end
-end
-
--- Esc: puts the title back as it was and leaves the field.
-local function cancel_title(state: State)
-	reset_field(state.title, state.title_orig)
-	local id = state.title_id
-	for _, todo in state.todos do
-		if todo.id == id and todo.title ~= state.title_orig then
-			patch(state, todo.id, function(item)
-				item.title = state.title_orig
-			end)
-		end
-	end
-	set_focus(state, nil)
 end
 
 -- Rename: focuses the title with its whole text selected, as Synara's inline rename does.
@@ -1706,29 +2285,21 @@ end
 
 -- The field a Tern edit/undo event belongs to, when that field is the focused one.
 local function field_of(state: State, id: string): Field?
-	local tail = string.match(id, "%.(%w+)$")
-	if tail == "field" and state.focus == "add" then
-		return state.add
-	elseif tail == "notes" and state.focus == "notes" then
-		return state.notes
-	elseif tail == "title" and state.focus == "title" then
-		return state.title
-	elseif tail == "q" and state.focus == "picker" and state.pick then
-		return state.pick.q
-	end
-	return nil
+	local f = if state.focus == "add" then state.add
+		elseif state.focus == "notes" then state.notes
+		elseif state.focus == "title" then state.title
+		elseif state.focus == "picker" and state.pick then state.pick.q
+		else nil
+	return if f and f.id == id then f else nil
 end
 
 -- Writes what a changed field holds: the detail fields go to the file, a popover's search
 -- resets the highlighted row.
 local function field_changed(state: State)
-	local t = selected(state)
 	if state.focus == "title" then
-		save_title(state)
-	elseif state.focus == "notes" and t then
-		patch(state, t.id, function(item)
-			item.notes = state.notes.text
-		end)
+		save_field(state, state.title, "title", "live")
+	elseif state.focus == "notes" then
+		save_field(state, state.notes, "notes", "live")
 	elseif state.focus == "picker" and state.pick then
 		state.pick.sel = 0
 		state.pick.hint = nil
@@ -2080,6 +2651,7 @@ local function field_key(state: State, key: Key): boolean
 			if title ~= "" then
 				add_task(state, title)
 				reset_field(state.add, "")
+				set_focus(state, "add")
 			end
 		end
 		return true
@@ -2092,12 +2664,19 @@ local function field_key(state: State, key: Key): boolean
 	local what = edit_key(f, key, state.cx)
 	if what == nil then
 		return false
-	elseif state.focus == "title" and key.name == "escape" then
-		cancel_title(state)
+	elseif key.name == "escape" then
+		local name = state.focus :: string
+		save_field(state, f, name, "cancel")
+		f.task = nil
+		set_focus(state, nil)
 	elseif what == "blur" or what == "submit" then
 		set_focus(state, nil)
 	elseif what == "text" then
 		field_changed(state)
+		if state.focus == "notes" and key.name == "enter" and not key.shift then
+			save_field(state, f, "notes", "commit")
+			f.conflict = false
+		end
 	end
 	return true
 end
@@ -2111,10 +2690,14 @@ local function el(tag: string, role: string, key: string, props: { [string]: any
 	return ui.el(tag, p, children)
 end
 
+local FIELD_IDS = { field = "main.ws.left.add.field", notes = "main.ws.detail.notes", title = "main.ws.detail.head.title", q = "layer.q" }
+
 -- A text field node whose text, caret and selection come from `f` while it is being
 -- edited, else from `idle` with the caret at its end.
 local function field_node(kind: string, props: { [string]: any }, f: Field?, idle: string): Node
 	if f then
+		f.id = FIELD_IDS[props.key] .. "_" .. f.rev
+		props.key ..= "_" .. f.rev
 		props.text = f.text
 		props.cursor = utf16_offset(f.text, f.cur)
 		if f.anchor and f.anchor ~= f.cur then
@@ -2209,9 +2792,16 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 		attrs = { ["data-active"] = if lifted and t.id == lifted.id then "true" else "false" },
 		actions = { click = "lift=" .. t.id, dblclick = "tap=" .. t.id },
 	})
+	local multi = state.sel[t.id] == true
+	local kids: { Node } = { glyph, el("div", "rowtext", "text", nil, text) }
+	if multi then
+		table.insert(kids, el("span", "tick", "tick"))
+	end
+	table.insert(kids, grip)
 	return el("div", "row", t.id, {
 		attrs = {
 			["data-state"] = if picked then "selected" else "idle",
+			["data-multi"] = if multi then "true" else "false",
 			["data-done"] = if t.done then "true" else "false",
 			["data-archived"] = if t.archived then "true" else "false",
 			["data-drop"] = drop,
@@ -2219,7 +2809,7 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 		mark = mark,
 		title = tip,
 		actions = { click = "sel=" .. t.id, dblclick = "open=" .. t.id },
-	}, { glyph, el("div", "rowtext", "text", nil, text), grip })
+	}, kids)
 end
 
 local function left_view(state: State): Node
@@ -2230,6 +2820,10 @@ local function left_view(state: State): Node
 		elseif open > 0 then open .. " open"
 		elseif #state.todos == archived then "All archived"
 		else "All done"
+	local picked_n = #multi_ids(state)
+	if picked_n >= 2 then
+		subtitle ..= " · " .. picked_n .. " selected"
+	end
 	local head = el("div", "head", "head", nil, {
 		el("div", "heading", "heading", { text = "Tasks" }),
 		el("div", "subtitle", "subtitle", { text = subtitle }),
@@ -2502,6 +3096,67 @@ local function detail_view(state: State, t: Todo): Node
 	}, head)
 end
 
+-- The modifier keys held during a click, as a set (Tern lists shift/ctrl/alt/meta).
+local function mods_of(ev: UiEvent): { [string]: boolean }
+	local out: { [string]: boolean } = {}
+	local m = ev.mods
+	if type(m) == "table" then
+		for _, name in m do
+			out[tostring(name)] = true
+		end
+		if out.cmd or out.super then
+			out.meta = true
+		end
+	end
+	return out
+end
+
+-- The card shown in place of the task card while two or more tasks are selected.
+local function bulk_view(state: State, ids: { string }): Node
+	local counts = { 0, 0, 0 }
+	local all_done, all_archived = true, true
+	for _, id in ids do
+		local t = todo_by_id(state, id)
+		if t then
+			local g = group_of(t)
+			counts[g] += 1
+			if not t.done then
+				all_done = false
+			end
+			if not t.archived then
+				all_archived = false
+			end
+		end
+	end
+	local parts: { string } = {}
+	for i, label in { "open", "done", "archived" } do
+		if counts[i] > 0 then
+			table.insert(parts, counts[i] .. " " .. label)
+		end
+	end
+	local confirm = state.confirm_bulk
+	return el("div", "detail", "bulk", { attrs = { ["data-focus"] = "none", ["data-bulk"] = "true" } }, {
+		el("div", "bulk-title", "title", { text = #ids .. " tasks selected" }),
+		el("div", "bulk-sub", "sub", { text = table.concat(parts, " · ") }),
+		el("div", "bulk-buttons", "buttons", nil, {
+			el("button", "pill", "archive", {
+				text = if all_archived then "Restore" else "Archive",
+				actions = { click = "bulk=archive" },
+			}),
+			el("button", "pill", "done", {
+				text = if all_done then "Mark as not done" else "Mark done",
+				actions = { click = "bulk=done" },
+			}),
+			el("button", "pill", "delete", {
+				text = if confirm then "Delete " .. #ids .. "?" else "Delete",
+				attrs = { ["data-confirm"] = if confirm then "true" else "false" },
+				actions = { click = "bulk=delete" },
+			}),
+			el("button", "pill", "clear", { text = "Clear", actions = { click = "bulk=clear" } }),
+		}),
+	})
+end
+
 local function hint_view(): Node
 	local card = ui.card({ ui.span("Todo Prototype", "strong") }, {
 		ui.md("No data file given. Open this block with the path to the JSON file as its argument."),
@@ -2538,8 +3193,6 @@ tern.block.define("list", {
 			add = new_field("", false, nil),
 			notes = new_field("", true, nil),
 			title = new_field("", false, TITLE_MAX),
-			title_id = nil,
-			title_orig = "",
 			pick = nil,
 			models = nil,
 			models_state = "idle",
@@ -2560,6 +3213,10 @@ tern.block.define("list", {
 			lift = nil,
 			tap = nil,
 			launching = {},
+			sel = {},
+			anchor = nil,
+			confirm_bulk = false,
+			closing = {},
 		}
 		running[cx.pane] = state
 		-- The add-omp-session command (window.luau) writes into the most recently opened file.
@@ -2595,7 +3252,10 @@ tern.block.define("list", {
 		end
 		local cols: { Node } = { left_view(state) }
 		local t = selected(state)
-		if t and state.detail_open then
+		local picked_ids = multi_ids(state)
+		if #picked_ids >= 2 then
+			table.insert(cols, bulk_view(state, picked_ids))
+		elseif t and state.detail_open then
 			table.insert(cols, detail_view(state, t))
 		end
 		local dock = ui.col({
@@ -2604,11 +3264,15 @@ tern.block.define("list", {
 					then "↑↓ PgUp PgDn choose  ·  Tab complete path  ·  ⏎ pick  ·  Esc close"
 					elseif state.focus == "title"
 					then "Enter save  ·  Esc cancel"
+					elseif state.focus == "notes"
+					then "Enter new line  ·  Tab save  ·  Esc cancel"
 					elseif state.focus
 					then "Enter " .. (if state.focus == "add" then "add task" else "new line") .. "  ·  Esc leave field"
 					else if state.lift
 						then "Click a task to move it there  ·  click the grip or Esc to cancel"
-						else "j/k move  ·  space done  ·  ⏎ open  ·  Tab add  ·  e notes  ·  F2 rename  ·  p project  ·  z archive  ·  ⌫ delete",
+						elseif next(state.sel) ~= nil
+						then "⇧↑↓ extend  ·  v mark  ·  ⌘A all  ·  space done  ·  z archive  ·  ⌫⌫ delete  ·  Esc clear"
+						else "j/k move  ·  space done  ·  ⏎ open  ·  Tab add  ·  e notes  ·  F2 rename  ·  p project  ·  z archive  ·  ⌫ delete  ·  v select",
 			}),
 		})
 		local dp: { [string]: any } = dock.p or {}
@@ -2629,6 +3293,14 @@ tern.block.define("list", {
 		if state.focus then
 			return field_key(state, key)
 		end
+		if key.shift and not (key.ctrl or key.alt or key.meta) and (key.name == "up" or key.name == "down") then
+			extend(state, if key.name == "up" then -1 else 1)
+			return true
+		end
+		if (key.meta or key.ctrl) and not (key.alt or key.shift) and key.name == "a" then
+			select_all(state)
+			return true
+		end
 		if (key.alt and not key.ctrl and not key.meta) or (key.meta and key.shift and not key.ctrl and not key.alt) then
 			if key.name == "up" or key.name == "down" then
 				step(state, if key.name == "up" then -1 else 1)
@@ -2640,6 +3312,10 @@ tern.block.define("list", {
 		end
 		local i = index_of(state)
 		local k = key.text or key.name
+		-- The card is hidden while several rows are selected, so keys that edit it do nothing.
+		if #multi_ids(state) >= 2 and (k == "e" or k == "n" or k == "p" or key.name == "f2") then
+			return true
+		end
 		if key.name == "up" or k == "k" then
 			move(state, i - 1)
 		elseif key.name == "down" or k == "j" then
@@ -2649,9 +3325,16 @@ tern.block.define("list", {
 		elseif key.name == "end" or k == "G" then
 			move(state, #state.todos)
 		elseif key.name == "space" or k == " " or k == "x" then
+			local ids = multi_ids(state)
 			local t = selected(state)
-			if t then
-				toggle(state, t.id)
+			if #ids >= 2 then
+				bulk_done(state, ids)
+			elseif t then
+				toggle_done(state, t.id)
+			end
+		elseif k == "v" then
+			if state.cursor then
+				toggle_mark(state, state.cursor)
 			end
 		elseif key.name == "enter" then
 			local t = selected(state)
@@ -2677,9 +3360,14 @@ tern.block.define("list", {
 			toggle_archived(state)
 		elseif key.name == "delete" or key.name == "backspace" then
 			delete_press(state)
-		elseif key.name == "escape" and (state.confirm or state.lift) then
-			clear_confirm(state)
-			state.lift = nil
+		elseif key.name == "escape" and (state.confirm or state.confirm_bulk or state.lift or next(state.sel) ~= nil) then
+			if state.lift or state.confirm or state.confirm_bulk then
+				clear_confirm(state)
+				state.lift = nil
+			else
+				clear_sel(state)
+				state.anchor = nil
+			end
 		else
 			return false
 		end
@@ -2688,7 +3376,7 @@ tern.block.define("list", {
 
 	event = function(state: State, ev: UiEvent, _cx: BlockCx)
 		if ev.ev == "focus" and type(ev.id) == "string" then
-			local tail = string.match(ev.id, "%.(%w+)$")
+			local tail = string.match(ev.id, "%.(%a+)_?%d*$")
 			if tail == "field" then
 				set_focus(state, "add")
 			elseif tail == "notes" then
@@ -2723,7 +3411,7 @@ tern.block.define("list", {
 			return
 		end
 		local act, value = ev.act, ev.value
-		if state.focus == "title" then
+		if state.focus == "title" or state.focus == "notes" then
 			set_focus(state, nil)
 		end
 		local t = selected(state)
@@ -2736,20 +3424,29 @@ tern.block.define("list", {
 				state.pick = nil
 				set_focus(state, nil)
 			end
+			local m = mods_of(ev)
 			local carried = state.lift
-			if carried then
-				-- The click drops the picked-up task here; it stays selected.
+			if m.meta or m.ctrl then
+				toggle_mark(state, value)
+			elseif m.shift then
 				state.lift = nil
-				if carried ~= value then
-					reorder(state, carried, value)
+				state.cursor = value
+				state.detail_open = true
+				select_range(state, value)
+			else
+				if carried then
+					-- The click drops the picked-up task here; it stays selected.
+					state.lift = nil
+					if carried ~= value then
+						reorder(state, carried, value)
+					end
+					value = carried
 				end
-				value = carried
+				clear_sel(state)
+				state.anchor = value
+				state.cursor = value
+				state.detail_open = true
 			end
-			if state.cursor ~= value then
-				clear_confirm(state)
-			end
-			state.cursor = value
-			state.detail_open = true
 		elseif act == "lift" and type(value) == "string" then
 			if repeated(state, "lift=" .. value) then
 				return
@@ -2766,6 +3463,7 @@ tern.block.define("list", {
 				end
 				state.cursor = value
 				state.lift = value
+				clear_sel(state)
 			end
 		elseif act == "open" and type(value) == "string" then
 			-- Double click: select the row, open its card, then do what Enter does.
@@ -2774,6 +3472,7 @@ tern.block.define("list", {
 				set_focus(state, nil)
 			end
 			state.lift = nil
+			clear_sel(state)
 			if state.cursor ~= value then
 				clear_confirm(state)
 			end
@@ -2790,7 +3489,7 @@ tern.block.define("list", {
 			-- The double click on a glyph or grip: its clicks already ran, and having an
 			-- action of its own keeps it from reaching the row's double click.
 		elseif act == "toggle" and type(value) == "string" then
-			toggle(state, value)
+			toggle_done(state, value)
 		elseif act == "close" then
 			if state.focus == "notes" then
 				set_focus(state, nil)
@@ -2810,7 +3509,7 @@ tern.block.define("list", {
 			if target then
 				local kind = status_of(state, target, live_panes())
 				if kind == "todo" or kind == "done" then
-					toggle(state, value)
+					toggle_done(state, value)
 				else
 					activate(state, target)
 				end
@@ -2837,6 +3536,8 @@ tern.block.define("list", {
 			delete_press(state)
 		elseif act == "arch" then
 			toggle_archived(state)
+		elseif act == "bulk" then
+			bulk_action(state, value)
 		end
 	end,
 })

@@ -1,5 +1,6 @@
 --!strict
 -- `tern open <name>.todo.json` opens the file as a Todos block instead of a file viewer.
+local session = require("./session")
 
 tern.route.open(function(req, _cx)
 	if string.match(req.path, "%.todo%.json$") then
@@ -325,27 +326,6 @@ local function strip_glyph(title: string): string
 	return (string.gsub(string.gsub(s, "^%s+", ""), "%s+$", ""))
 end
 
--- {title, id} from the first two lines of an omp session file: the title slot, then the header.
--- Legacy files have the header first and may carry the title there.
-local function read_head(stdout: string): (string, string?)
-	local title, id = "", nil
-	for line in string.gmatch(stdout, "[^\n]+") do
-		local ok, entry = pcall(tern.json.decode, line)
-		if ok and type(entry) == "table" then
-			if entry.type == "title" and type(entry.title) == "string" then
-				title = entry.title
-			elseif entry.type == "session" then
-				if type(entry.id) == "string" then
-					id = entry.id
-				end
-				if title == "" and type(entry.title) == "string" then
-					title = entry.title
-				end
-			end
-		end
-	end
-	return title, id
-end
 
 local function add_omp_session(cx: WindowCx)
 	local fok, path = pcall(tern.kv.get, FILE_KEY)
@@ -401,7 +381,7 @@ local function add_omp_session(cx: WindowCx)
 				fail(cx2, "The omp session is not saved yet", "Send a message in omp first")
 				return
 			end
-			local title, id = read_head(head.stdout)
+			local title, id = session.read_head(head.stdout)
 			if id ~= file_id then
 				fail(cx2, "Cannot read the omp session id", file)
 				return
