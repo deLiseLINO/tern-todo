@@ -880,7 +880,7 @@ local function add_task(state: State, title: string)
 			n += 1
 		end
 		new_id = "t" .. n
-		table.insert(list, {
+		table.insert(list, 1, {
 			id = new_id,
 			title = title,
 			notes = "",

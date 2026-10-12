@@ -335,7 +335,7 @@ local function add_task(path: string, target: Target): (string?, string, string?
 		while taken["t" .. n] do
 			n += 1
 		end
-		table.insert(list, {
+		table.insert(list, 1, {
 			id = "t" .. n,
 			title = target.title,
 			notes = "",
