@@ -731,6 +731,10 @@
 		color: var(--tp-faint);
 	}
 
+	& [data-role='todo-proto.agent-row'] [data-role='todo-proto.pillbtn'][data-icon='folder'] {
+		max-width: min(100%, 260px);
+	}
+
 	& [data-role='todo-proto.agent-row'] {
 		display: flex;
 		flex-direction: row;

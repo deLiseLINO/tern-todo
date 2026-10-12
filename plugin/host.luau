@@ -3924,15 +3924,11 @@ local function detail_view(state: State, t: Todo): Node
 	})
 	local agent = el("div", "agent", "agent", nil, {
 		el("div", "agent-title", "title", { text = "Hand it to an agent" }),
-		el("div", "agent-row", "r1", nil, {
+		el("div", "agent-row", "pills", nil, {
 			pill_box(state, "model", "model", t.agent.model or "Default model", nil, nil),
 			level_pill(t.agent.thinking),
-		}),
-		el("div", "agent-row", "r2", nil, {
 			pill_box(state, "project", "cwd", if t.links.cwd then basename(t.links.cwd) else "No project", nil, "folder"),
 			click_pill("worktree", if state.cfg.new_chat_worktree then "Worktree" else "Local", nil, "none", "worktree"),
-		}),
-		el("div", "agent-row", "r3", nil, {
 			pill_box(state, "chat", "chat", chat_title(state, t), nil, nil),
 		}),
 	})
