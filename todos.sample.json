@@ -1,0 +1,53 @@
+{
+  "todos": [
+    {
+      "id": "t1",
+      "title": "Сделать нативный вид cq в Tern",
+      "notes": "Использовать Go SDK Tern.\nСначала таблица аккаунтов с полосой квоты, потом переключение аккаунта по Enter.",
+      "priority": "high",
+      "due": "2026-10-15",
+      "done": false,
+      "links": {
+        "tern_pane": 274877906945,
+        "cwd": "/Users/delise/projects/slop",
+        "omp_session": "a1b2c3d4"
+      }
+    },
+    {
+      "id": "t2",
+      "title": "Проверить, переживают ли номера панелей перезапуск Tern",
+      "notes": "Перезапустить демон и сравнить tern inspect до и после.",
+      "priority": "urgent",
+      "due": "2026-10-13",
+      "done": false,
+      "links": { "tern_pane": 223338299407, "cwd": "/Users/delise/projects/prism", "omp_session": null }
+    },
+    {
+      "id": "t3",
+      "title": "Достать id текущей сессии omp для привязки",
+      "notes": "Возможно, нужен маленький хук в самом omp.",
+      "priority": "medium",
+      "due": null,
+      "done": false,
+      "links": { "tern_pane": null, "cwd": null, "omp_session": "e5f6a7b8" }
+    },
+    {
+      "id": "t4",
+      "title": "Описать формат хранения задач",
+      "notes": "",
+      "priority": "low",
+      "due": null,
+      "done": true,
+      "links": { "tern_pane": null, "cwd": null, "omp_session": null }
+    },
+    {
+      "id": "t5",
+      "title": "Привязка панели, которой уже нет",
+      "notes": "Пример задачи, у которой панель закрыта: по Enter должна предложить omp --resume.",
+      "priority": "none",
+      "due": "2026-10-20",
+      "done": false,
+      "links": { "tern_pane": 999999999999, "cwd": "/Users/delise/projects/prism", "omp_session": "c9d0e1f2" }
+    }
+  ]
+}

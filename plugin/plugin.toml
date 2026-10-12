@@ -1,0 +1,14 @@
+schema = 1
+id = "todo-proto"
+name = "Todo Prototype"
+version = "0.1.0"
+description = "Personal to-do list linked to Tern panes and omp sessions (prototype)."
+icon = "check"
+host = "host.luau"
+window = "window.luau"
+styles = ["styles.css"]
+
+[[blocks]]
+id = "list"
+title = "Todos"
+files = ["todos*.json", "tern-todo*.json"]
