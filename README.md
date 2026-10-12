@@ -2,6 +2,12 @@
 
 A personal to-do list for Tern, a Synara-style Tasks block. It is a Luau plugin (`plugin/`, id `todo-proto`) over one JSON file. Tasks can link to a Tern pane, a working directory and an omp session, and can be handed to omp from the block.
 
+## Contribute through GitHub
+
+The source repository is [deLiseLINO/tern-todo](https://github.com/deLiseLINO/tern-todo), with `main` as its default branch. Open code pull requests there, not in the parent GitLab repository.
+
+When this project is checked out inside `slop`, it is a Git submodule. Create task worktrees from the tern-todo repository and follow `AGENTS.md`. The parent repository records only the submodule commit.
+
 ## Open the block
 
 ```
@@ -9,7 +15,7 @@ tern plugin link <path to>/tern-todo/plugin     # once
 tern open --split right my.todo.json             # any *.todo.json (or todos*.json, tern-todo*.json)
 ```
 
-The file must be `{"todos": [...]}`. The block re-reads it every 5 s (not while a text field is focused) and when the palette command below changes it.
+The file must be `{"todos": [...]}`. The block reloads it within about 0.2 s of a change (not while a text field is focused), found by `fswatch` (`brew install fswatch`, expected at `/opt/homebrew/bin/fswatch`), and also re-reads it every 5 s as a fallback when `fswatch` is missing. The palette command below changes it the same way.
 
 ## Keys (no field focused)
 
@@ -18,7 +24,7 @@ The file must be `{"todos": [...]}`. The block re-reads it every 5 s (not while 
 | j / k, Up / Down | move |
 | Space, x | toggle done; with two or more tasks selected, mark all done, or not done when all are done. Done closes an idle linked pane; not done reopens a linked omp chat. See below for the safety rules. |
 | Enter | focus the linked pane; else resume the linked omp chat in a new tab; else start the task in omp |
-| Tab, a | add a task (type the title, Enter adds, Esc or Tab leaves the field) |
+| Tab, a | new task: opens its card with the last picked project preselected and puts the caret in the add field; the task is created, and appears in the list, only when Enter accepts the title; Esc or leaving the field discards it |
 | e | edit notes (Enter inserts a newline, Tab or a click elsewhere commits, Esc discards the draft) |
 | F2, n | rename the selected task (whole title selected; Enter, Tab or a click elsewhere commits, Esc discards the draft) |
 | p | pick the project (cwd) |
@@ -73,7 +79,7 @@ Marking a task done from the keyboard, plain-task glyph, card or bulk panel clos
 - The omp state is unknown, or the foreground job is neither an idle shell nor idle/exited omp. The foreground process is checked with `tern process --json`.
 - The pane hosts this task block, another not-done task shares it, or the process check fails.
 
-A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 2 seconds old; a new job starting between the check and close is not protected by that earlier check.
+A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 0.2 seconds old; a new job starting between the check and close is not protected by that earlier check.
 
 Marking a task not done reopens its omp chat in a new tab with `omp --resume <id>` in the task cwd when it has a session but no live pane. A task without a session just becomes open; it does not start an agent. Repeated toggles are ignored while that task's close or reopen is in flight.
 
@@ -88,7 +94,7 @@ Which moment counts:
 | Task | Moment |
 | --- | --- |
 | done | `completed` (falls back to `updated`, then `created`, when a done task has no `completed`) |
-| has a linked omp chat (not done) | the later of `updated` and the chat file's last activity (mtime of `~/.omp/agent/sessions/*/*_<id>.jsonl`, sampled with one `stat` on the 5 s file poll; the file is located once with `find`, retried every 20 s while it is missing) |
+| has a linked omp chat (not done) | the later of `updated` and the chat file's last activity (mtime of `~/.omp/agent/sessions/*/*_<id>.jsonl`, sampled with one `stat` after each `fswatch` event on a known chat file and on the 5 s file poll; the file is located once with `find`, retried every 20 s while it is missing) |
 | otherwise | `updated`, else `created` |
 | no valid stamp | no label |
 
@@ -96,9 +102,9 @@ Tasks created before this version have no stamps and show no label until the blo
 
 ## Settings
 
-The gear in the bottom right corner, the `,` key when no field has focus and the palette command `Todo: settings` open the same centred Settings sheet. The palette command `plugin.todo-proto.settings` works from the focused Todos block; elsewhere it toasts `Focus a Todos block first`. Click a row, or use Up / Down, j / k, Home / End, Space or Enter to flip the selected switch. Esc, `,`, the close button or a click outside closes it. A change applies at once; palette requests reach the block within about 2 seconds.
+The gear in the bottom right corner, the `,` key when no field has focus and the palette command `Todo: settings` open the same centred Settings sheet. The palette command `plugin.todo-proto.settings` works from the focused Todos block; elsewhere it toasts `Focus a Todos block first`. Click a row, or use Up / Down, j / k, Home / End, Space or Enter to flip the selected switch. Esc, `,`, the close button or a click outside closes it. A change applies at once; palette requests reach the block within about 0.2 seconds.
 
-Settings live in the plugin's kv under `settings` (`<data>/kv.json`), not in the todo file. They are shared by every Todos block and window; other blocks pick a change up within about 2 seconds and the values survive `tern plugin reload` and a restart. A key that was never set uses its default.
+Settings live in the plugin's kv under `settings` (`<data>/kv.json`), not in the todo file. They are shared by every Todos block and window; other blocks pick a change up within about 0.2 seconds and the values survive `tern plugin reload` and a restart. A key that was never set uses its default.
 
 Existing `done_group` values from the older `todo-proto.settings` store migrate once into `settings`, without overwriting values already there. The old store is removed after a successful migration; existing setting keys and defaults stay valid.
 
@@ -108,12 +114,14 @@ Existing `done_group` values from the older `todo-proto.settings` store migrate 
 | Show row action icons | on | no idle Done, Move, Archive or Delete icons on rows; keyboard deletion still shows `Delete?`; the grip, keyboard shortcuts and bulk panel actions stay available |
 | Close pane when a task is done | on | marking done only changes the status; the linked pane stays open and linked |
 | Reopen chat when a task is not done | on | marking not done only changes the status; the omp chat is not resumed |
+| Open pane when a task starts | on | starting or resuming a task still opens and links its tab, but leaves it in the background instead of switching to it |
 | Double-click opens pane | on | a double click only selects the row and opens its card |
 | Show archived section | on | the Archived header and its rows on the Tasks tab are hidden; Z does nothing; archiving still works. Backlog never shows archived tasks. |
 | Show badges on rows | on | no priority / pane / omp chips under the title |
 | Show agent status on rows | on | no Working / Needs you / Ready for you / Stopped line under the title (the card chip stays) |
 | Show key hints | on | no shortcut line at the bottom of the block |
 | Done tasks as a separate group | off | done tasks stay in the main list. When on, done tasks leave the main list and sit under a collapsed `Done (N)` header, above the Archived header. Click the header to expand it. Keyboard navigation and selection only see the done rows while the group is expanded. |
+| Task titles from omp | off | task titles stay as you typed them. When on, the 10 s scan (see "Automatic import") copies the title omp gave a session onto the task linked to it, even if you named the task yourself. A title you typed then works as the first prompt: it is sent to omp when you start the task, and omp's name replaces it afterwards. A renamed task is overwritten again at the next scan while omp's title differs. A session without an omp title leaves the task title alone. The scan runs only while a Todos block is open. |
 
 ## Order model
 
