@@ -3930,21 +3930,10 @@ local function detail_view(state: State, t: Todo): Node
 		}),
 		el("div", "agent-row", "r2", nil, {
 			pill_box(state, "project", "cwd", if t.links.cwd then basename(t.links.cwd) else "No project", nil, "folder"),
+			click_pill("worktree", if state.cfg.new_chat_worktree then "Worktree" else "Local", nil, "none", "worktree"),
 		}),
 		el("div", "agent-row", "r3", nil, {
 			pill_box(state, "chat", "chat", chat_title(state, t), nil, nil),
-		}),
-		el("div", "agent-row", "launch-mode", { aria = "New chat directory" }, {
-			el("button", "pillbtn", "local", {
-				text = "Local",
-				attrs = { ["data-icon"] = "none", ["data-chev"] = "no", ["aria-pressed"] = if state.cfg.new_chat_worktree then "false" else "true" },
-				actions = { click = "worktree=local" },
-			}),
-			el("button", "pillbtn", "worktree", {
-				text = "Worktree",
-				attrs = { ["data-icon"] = "none", ["data-chev"] = "no", ["aria-pressed"] = if state.cfg.new_chat_worktree then "true" else "false" },
-				actions = { click = "worktree=worktree" },
-			}),
 		}),
 	})
 	local buttons = el("div", "buttons", "buttons", nil, {
@@ -4458,11 +4447,8 @@ tern.block.define("list", {
 		if state.lift and act ~= "sel" and act ~= "lift" and act ~= "open" and act ~= "tap" then
 			state.lift = nil
 		end
-		if act == "worktree" and (value == "local" or value == "worktree") then
-			refresh_cfg(state)
-			if state.cfg.new_chat_worktree ~= (value == "worktree") then
-				toggle_setting(state, "new_chat_worktree")
-			end
+		if act == "worktree" then
+			toggle_setting(state, "new_chat_worktree")
 			return
 		end
 		if act == "sel" and type(value) == "string" then

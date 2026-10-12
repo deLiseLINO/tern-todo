@@ -739,11 +739,6 @@
 		gap: 8px;
 	}
 
-	& [data-role='todo-proto.pillbtn'][aria-pressed='true'] {
-		background-color: rgb(from var(--t1) r g b / 12%);
-		color: var(--tp-ink);
-	}
-
 	& [data-role='todo-proto.buttons'] {
 		display: flex;
 		flex-direction: row;
