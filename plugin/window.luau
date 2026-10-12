@@ -48,6 +48,32 @@ if saved_ok and type(saved) == "table" then
 	end
 end
 
+-- The ask tool renders in the editor region (root "e"), not in the layer, so an empty layer does
+-- not mean the wait is stale while a question is on screen.
+local function has_ask(node: any): boolean
+	if type(node) ~= "table" then
+		return false
+	end
+	if type(node.p) == "table" and node.p.role == "omp.ask.question" then
+		return true
+	end
+	if type(node.c) == "table" then
+		for _, child in node.c do
+			if has_ask(child) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function ask_open(cx: WindowCx, pane: number): boolean
+	local ok, tree = pcall(function()
+		return cx.session:surface(pane, { as = "table", root = "e", depth = 3, nodes = 40 })
+	end)
+	return ok and type(tree) == "table" and has_ask(tree.main)
+end
+
 local function sample(cx: WindowCx)
 	local ok, watch = pcall(tern.kv.get, "watch")
 	if not ok or type(watch) ~= "number" or os.time() - watch > WATCH_FRESH_S then
@@ -74,7 +100,8 @@ local function sample(cx: WindowCx)
 				if layer_ok and type(tree) == "table" and tree.surface
 					and tree.surface.role == "omp.session" and tree.main
 					and tree.main.id == "layer" and not tree.main.more
-					and (tree.main.c == nil or #tree.main.c == 0) then
+					and (tree.main.c == nil or #tree.main.c == 0)
+					and not ask_open(cx, a.pane) then
 					state = if a.busy == false then "idle" else "working"
 				end
 			end
