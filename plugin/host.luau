@@ -9,12 +9,6 @@
 -- cmd+shift+Up / Down) move the selected task one place within its group. Double-clicking a
 -- row selects it, opens its card and does what Enter does. The grip at the right of a row
 -- picks the task up; the next click on a row drops it there (Esc or the grip again cancels).
--- Done closes the pane: marking a task done (x / space, the glyph, the card button or the bulk
--- button) closes its linked pane with `tern close` unless the agent is working or needs you, or
--- a command runs in it; the link is then cleared. Marking it not done again reopens its omp
--- chat (`omp --resume`) when it has a session. Several tasks can be selected (cmd/ctrl-click
--- toggles a row, shift-click a range; shift+Up/Down, v, cmd/ctrl+A, Esc) and archived, deleted or
--- marked done together from the bulk panel (z, Delete and x act on the whole selection too).
 -- Keys (field focused): typing edits the field, Enter adds the task (add row), saves the
 -- title or inserts a newline (notes), Tab commits; Esc discards title/notes drafts.
 --
@@ -114,7 +108,7 @@ local SETTINGS_REQ_KEY = "todo-proto.settings_req"
 local SETTINGS: { { id: string, label: string, hint: string, default: boolean } } = {
 	{ id = "time", label = "Show time on rows", hint = "How long ago a task was last touched, at the right of the row.", default = true },
 	{ id = "row_actions", label = "Show row action icons", hint = "Done, move to backlog, archive and delete buttons on hovered rows.", default = true },
-	{ id = "close_on_done", label = "Close pane when a task is done", hint = "Done closes the linked pane unless the agent is busy.", default = true },
+	{ id = "close_on_done", label = "Close pane on done, archive or backlog", hint = "Closes the linked pane unless the agent is busy.", default = true },
 	{ id = "reopen_on_undone", label = "Reopen chat when a task is not done", hint = "Not done resumes the task's omp chat in a new tab.", default = true },
 	{ id = "focus_on_start", label = "Open pane when a task starts", hint = "Switch to the new tab right away. Off opens it in the background.", default = true },
 	{ id = "new_chat_worktree", label = "Create new chats in a worktree", hint = "Start new chats in a separate Git worktree. Existing chats keep their directory.", default = true },
@@ -1095,6 +1089,8 @@ local function neighbour(state: State, id: string): string?
 	return if other then other.id else nil
 end
 
+local close_task_panes: (State, { [string]: boolean }, ({ [string]: number }) -> boolean) -> ()
+
 -- Archives the selected tasks, or restores them when all of them are archived (one write).
 local function bulk_archive(state: State, ids: { string })
 	local set: { [string]: boolean } = {}
@@ -1109,49 +1105,40 @@ local function bulk_archive(state: State, ids: { string })
 	local target = not all_archived
 	local after = survivor(state, set)
 	clear_confirm(state)
-	local written = rewrite(state, function(list)
-		for _, item in list do
-			if type(item) == "table" and set[item.id] then
-				item.archived = if target then true else nil
-				if target then
-					item.backlog = nil
+	local function commit(closed: { [string]: number }): boolean
+		local written = rewrite(state, function(list)
+			for _, item in list do
+				if type(item) == "table" and set[item.id] then
+					item.archived = if target then true else nil
+					if target then
+						item.backlog = nil
+					end
+					local pane = closed[item.id]
+					if pane and type(item.links) == "table" and tonumber(item.links.tern_pane) == pane then
+						item.links.tern_pane = nil
+					end
 				end
 			end
+		end)
+		if written then
+			state.sel = {}
+			state.anchor = nil
+			state.cursor = after or state.cursor
+			ensure_cursor(state)
+			state.cx:toast("info", (if target then "Archived " else "Restored ") .. #ids .. " tasks")
 		end
-	end)
-	if written then
-		state.sel = {}
-		state.anchor = nil
-		state.cursor = after or state.cursor
-		ensure_cursor(state)
-		state.cx:toast("info", (if target then "Archived " else "Restored ") .. #ids .. " tasks")
+		return written
+	end
+	if target then
+		close_task_panes(state, set, commit)
+	else
+		commit({})
 	end
 end
 
--- Archive keeps the record, its links and any running agent untouched; Restore drops the key.
 local function archive_toggle(state: State, t: Todo)
 	local ids = multi_ids(state)
-	if #ids >= 2 then
-		bulk_archive(state, ids)
-		return
-	end
-	local target = not t.archived
-	local after = neighbour(state, t.id)
-	clear_confirm(state)
-	local written = rewrite(state, function(list)
-		for _, item in list do
-			if type(item) == "table" and item.id == t.id then
-				item.archived = if target then true else nil
-				if target then
-					item.backlog = nil
-				end
-			end
-		end
-	end)
-	if written then
-		state.cursor = after
-		state.cx:toast("info", if target then "Archived" else "Restored")
-	end
+	bulk_archive(state, if #ids >= 2 then ids else { t.id })
 end
 
 -- First press arms the confirmation on the task's own button, the second removes the record.
@@ -1278,22 +1265,34 @@ local function backlog_ids(state: State, ids: { string })
 	local target = not all_backlog
 	local after = survivor(state, set)
 	clear_confirm(state)
-	local written = rewrite(state, function(list)
-		for _, item in list do
-			if type(item) == "table" and set[item.id] then
-				item.backlog = if target then true else nil
-				if target then
-					item.done = false
+	local function commit(closed: { [string]: number }): boolean
+		local written = rewrite(state, function(list)
+			for _, item in list do
+				if type(item) == "table" and set[item.id] then
+					item.backlog = if target then true else nil
+					if target then
+						item.done = false
+					end
+					local pane = closed[item.id]
+					if pane and type(item.links) == "table" and tonumber(item.links.tern_pane) == pane then
+						item.links.tern_pane = nil
+					end
 				end
 			end
+		end)
+		if written then
+			state.sel = {}
+			state.anchor = nil
+			state.cursor = after or state.cursor
+			ensure_cursor(state)
+			state.cx:toast("info", if target then "Moved to backlog" else "Back to tasks")
 		end
-	end)
-	if written then
-		state.sel = {}
-		state.anchor = nil
-		state.cursor = after or state.cursor
-		ensure_cursor(state)
-		state.cx:toast("info", if target then "Moved to backlog" else "Back to tasks")
+		return written
+	end
+	if target then
+		close_task_panes(state, set, commit)
+	else
+		commit({})
 	end
 end
 
@@ -1982,15 +1981,20 @@ local function update_states(state: State): boolean
 	local live = live_panes()
 	local ok_closed, raw_closed = pcall(tern.kv.get, "closed_panes")
 	local events = if ok_closed and type(raw_closed) == "table" then raw_closed else {}
+	local ok_managed, raw_managed = pcall(tern.kv.get, "managed_closes")
+	local managed = if ok_managed and type(raw_managed) == "table" then raw_managed else {}
 	local seen = state.closed_panes
 	local closed: { [string]: boolean } = {}
 	if seen then
 		for pane in events do
-			if not seen[pane] then
+			if not seen[pane] and not managed[pane] then
 				closed[pane] = true
 			end
 		end
 	else
+		state.closed_panes = events
+	end
+	if next(closed) == nil then
 		state.closed_panes = events
 	end
 	local completed = false
@@ -2207,10 +2211,177 @@ local function plural(n: number, noun: string): string
 	return n .. " " .. noun .. (if n == 1 then "" else "s")
 end
 
--- Sets `done` on the tasks `ids` (those that differ), in ONE file write.
--- Going done closes each live linked pane when it is safe (keep_reason) and clears the link;
--- going open reopens the omp chat of a task that has a session and no live pane. A task
--- whose close or reopen is in flight ignores a second toggle.
+close_task_panes = function(state: State, set: { [string]: boolean }, commit: ({ [string]: number }) -> boolean)
+	local want: { string } = {}
+	for id in set do
+		if todo_by_id(state, id) and not busy(state, id) then
+			table.insert(want, id)
+		else
+			set[id] = nil
+		end
+	end
+	if #want == 0 then
+		return
+	end
+	local bulk = #want > 1
+	refresh_cfg(state)
+	-- One entry per live pane; tasks sharing a pane follow its verdict.
+	local live = live_panes()
+	local groups: { { pane: number, ids: { string } } } = {}
+	for _, id in want do
+		local t = todo_by_id(state, id) :: Todo
+		local pane = t.links.tern_pane
+		if pane and live[pane] then
+			local found = false
+			for _, g in groups do
+				if g.pane == pane then
+					table.insert(g.ids, id)
+					found = true
+				end
+			end
+			if not found then
+				table.insert(groups, { pane = pane, ids = { id } })
+			end
+		end
+	end
+	-- Setting off: the task only changes status; its pane and link stay.
+	if not state.cfg.close_on_done then
+		groups = {}
+	end
+	if #groups == 0 then
+		commit({})
+		return
+	end
+
+	for _, id in want do
+		state.closing[id] = true
+	end
+	local closed: { [string]: number } = {}
+	local closed_panes, left_panes = 0, 0
+	local why: { string } = {}
+	local function finish()
+		for _, id in want do
+			state.closing[id] = nil
+		end
+		for _, g in groups do
+			local key = tostring(g.pane)
+			if closed[g.ids[1]] then
+				state.agent_states[key] = nil
+				state.since[g.pane] = nil
+				state.launched[g.pane] = nil
+			end
+		end
+		local written = commit(closed)
+		if written and #why > 0 and not bulk then
+			state.cx:toast("info", "Pane left open (" .. why[1] .. ")")
+		elseif written and bulk then
+			local parts: { string } = {}
+			if closed_panes > 0 then
+				table.insert(parts, "Closed " .. plural(closed_panes, "pane"))
+			end
+			if left_panes > 0 then
+				table.insert(parts, (if closed_panes > 0 then "left " else "Left ") .. left_panes .. " open")
+			end
+			state.cx:toast("info", table.concat(parts, ", "), if #why > 0 then table.concat(why, "; ") else nil)
+		end
+		if alive(state) then
+			state.cx:render()
+		end
+	end
+
+	local function leave(reason: string)
+		left_panes += 1
+		if not table.find(why, reason) then
+			table.insert(why, reason)
+		end
+	end
+
+	local function close_phase(candidates: { { pane: number, ids: { string } } })
+		local pending = #candidates
+		if pending == 0 then
+			finish()
+			return
+		end
+		for _, g in candidates do
+			local function settle()
+				pending -= 1
+				if pending == 0 then
+					finish()
+				end
+			end
+			local key = tostring(g.pane)
+			local function mark_managed(value: boolean?)
+				local raw = tern.kv.get("managed_closes")
+				local managed = if type(raw) == "table" then raw else {}
+				managed[key] = value
+				tern.kv.set("managed_closes", managed)
+			end
+			if not pcall(mark_managed, true) then
+				leave("cannot record pane closure")
+				settle()
+				continue
+			end
+			local ok = pcall(tern.process.run, { TERN, "close", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+				if result.status == 0 then
+					closed_panes += 1
+					for _, id in g.ids do
+						closed[id] = g.pane
+					end
+				else
+					pcall(mark_managed, nil)
+					leave("close failed")
+					state.cx:toast("error", "tern close failed", string.match(result.stderr, "[^\n]+") or ("exit " .. result.status))
+				end
+				settle()
+			end)
+			if not ok then
+				pcall(mark_managed, nil)
+				leave("cannot run tern")
+				settle()
+			end
+		end
+	end
+
+	local candidates: { { pane: number, ids: { string } } } = {}
+	local probing = #groups
+	local function probed()
+		probing -= 1
+		if probing == 0 then
+			close_phase(candidates)
+		end
+	end
+	for _, g in groups do
+		local reason: string? = nil
+		if g.pane == state.cx.pane then
+			reason = "this is the todo pane"
+		else
+			for _, other in state.todos do
+				if other.links.tern_pane == g.pane and not set[other.id] and not other.done then
+					reason = "shared with another task"
+				end
+			end
+		end
+		if reason then
+			leave(reason)
+			probed()
+		else
+			local ok = pcall(tern.process.run, { TERN, "process", "--json", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+				local why_not = if result.status ~= 0 then "cannot inspect it" else keep_reason(state, g.pane, result.stdout)
+				if why_not then
+					leave(why_not)
+				else
+					table.insert(candidates, g)
+				end
+				probed()
+			end)
+			if not ok then
+				leave("cannot run tern")
+				probed()
+			end
+		end
+	end
+end
+
 local function set_done(state: State, ids: { string }, to: boolean)
 	local want: { string } = {}
 	local set: { [string]: boolean } = {}
@@ -2264,153 +2435,14 @@ local function set_done(state: State, ids: { string }, to: boolean)
 			end
 		end)
 	end
-
-	-- One entry per live pane; tasks sharing a pane follow its verdict.
-	local live = live_panes()
-	local groups: { { pane: number, ids: { string } } } = {}
-	for _, id in want do
-		local t = todo_by_id(state, id) :: Todo
-		local pane = t.links.tern_pane
-		if pane and live[pane] then
-			local found = false
-			for _, g in groups do
-				if g.pane == pane then
-					table.insert(g.ids, id)
-					found = true
-				end
-			end
-			if not found then
-				table.insert(groups, { pane = pane, ids = { id } })
-			end
-		end
-	end
-	-- Setting off: the task only changes status; its pane and link stay.
-	if not state.cfg.close_on_done then
-		groups = {}
-	end
-	if #groups == 0 then
-		if write_done({}) and bulk then
+	close_task_panes(state, set, function(closed)
+		local written = write_done(closed)
+		if written and bulk and next(closed) == nil then
 			state.cx:toast("info", "Marked " .. #want .. " done")
 		end
-		return
-	end
+		return written
+	end)
 
-	for _, id in want do
-		state.closing[id] = true
-	end
-	local closed: { [string]: number } = {}
-	local closed_panes, left_panes = 0, 0
-	local why: { string } = {}
-	local function finish()
-		for _, id in want do
-			state.closing[id] = nil
-		end
-		for _, g in groups do
-			local key = tostring(g.pane)
-			if closed[g.ids[1]] then
-				state.agent_states[key] = nil
-				state.since[g.pane] = nil
-				state.launched[g.pane] = nil
-			end
-		end
-		local written = write_done(closed)
-		if written and #why > 0 and not bulk then
-			state.cx:toast("info", "Pane left open (" .. why[1] .. ")")
-		elseif written and bulk then
-			local parts: { string } = {}
-			if closed_panes > 0 then
-				table.insert(parts, "Closed " .. plural(closed_panes, "pane"))
-			end
-			if left_panes > 0 then
-				table.insert(parts, (if closed_panes > 0 then "left " else "Left ") .. left_panes .. " open")
-			end
-			if #parts == 0 then
-				parts = { "Marked " .. #want .. " done" }
-			end
-			state.cx:toast("info", table.concat(parts, ", "), if #why > 0 then table.concat(why, "; ") else nil)
-		end
-		if alive(state) then
-			state.cx:render()
-		end
-	end
-
-	local function leave(reason: string)
-		left_panes += 1
-		if not table.find(why, reason) then
-			table.insert(why, reason)
-		end
-	end
-
-	local function close_phase(candidates: { { pane: number, ids: { string } } })
-		local pending = #candidates
-		if pending == 0 then
-			finish()
-			return
-		end
-		for _, g in candidates do
-			local function settle()
-				pending -= 1
-				if pending == 0 then
-					finish()
-				end
-			end
-			local ok = pcall(tern.process.run, { TERN, "close", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
-				if result.status == 0 then
-					closed_panes += 1
-					for _, id in g.ids do
-						closed[id] = g.pane
-					end
-				else
-					leave("close failed")
-					state.cx:toast("error", "tern close failed", string.match(result.stderr, "[^\n]+") or ("exit " .. result.status))
-				end
-				settle()
-			end)
-			if not ok then
-				leave("cannot run tern")
-				settle()
-			end
-		end
-	end
-
-	local candidates: { { pane: number, ids: { string } } } = {}
-	local probing = #groups
-	local function probed()
-		probing -= 1
-		if probing == 0 then
-			close_phase(candidates)
-		end
-	end
-	for _, g in groups do
-		local reason: string? = nil
-		if g.pane == state.cx.pane then
-			reason = "this is the todo pane"
-		else
-			for _, other in state.todos do
-				if other.links.tern_pane == g.pane and not set[other.id] and not other.done then
-					reason = "shared with another task"
-				end
-			end
-		end
-		if reason then
-			leave(reason)
-			probed()
-		else
-			local ok = pcall(tern.process.run, { TERN, "process", "--json", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
-				local why_not = if result.status ~= 0 then "cannot inspect it" else keep_reason(state, g.pane, result.stdout)
-				if why_not then
-					leave(why_not)
-				else
-					table.insert(candidates, g)
-				end
-				probed()
-			end)
-			if not ok then
-				leave("cannot run tern")
-				probed()
-			end
-		end
-	end
 end
 
 local function toggle_done(state: State, id: string)

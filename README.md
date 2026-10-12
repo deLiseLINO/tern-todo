@@ -145,19 +145,21 @@ Starting a selection cancels a grip pick-up; picking up a row clears the selecti
 
 With two or more tasks selected the task card becomes `N tasks selected`, with open, done and archived counts. Its buttons are To backlog, Archive, Mark done, Delete and Clear. To backlog becomes Back to tasks for a backlog selection. Archive becomes Restore when all selected tasks are archived; Mark done becomes Mark as not done when all are done. Delete first shows `Delete N?` in red; a second press deletes those records only, never their panes or omp sessions. Confirmation expires after 4 seconds and clears on Esc or a selection change.
 
-Bulk archive, restore and delete each use one read-modify-write by task id. Bulk done writes once after the pane close checks finish; reopening chats then writes their new pane links. External edits, unknown keys and explicit nulls survive. IDs that disappear or become hidden leave the selection on the next re-read. In a narrow window the bulk panel sits above the list.
+Bulk archive, backlog and done each write once after the pane close checks finish. Restore and delete each use one read-modify-write by task id. Reopening chats then writes their new pane links. External edits, unknown keys and explicit nulls survive. IDs that disappear or become hidden leave the selection on the next re-read. In a narrow window the bulk panel sits above the list.
 
-## Done and the pane
+## Done, archive, backlog and the pane
 
-Closing a linked tab or pane marks its tasks done, records the completion time, and clears `links.tern_pane`. The omp session and cwd stay linked. This works while a Todos block watches the file, even when that block is in a background tab. Completion waits until you leave an active text field. A pane ID already missing when the block opens does not complete a task. Exiting omp without closing its pane does not complete a task. The `Close pane when a task is done` setting controls the opposite direction only.
+Closing a linked tab or pane marks its tasks done, records the completion time, and clears `links.tern_pane`. The omp session and cwd stay linked. This works while a Todos block watches the file, even when that block is in a background tab. Completion waits until you leave an active text field. A pane ID already missing when the block opens does not complete a task. Exiting omp without closing its pane does not complete a task. The `Close pane on done, archive or backlog` setting controls the opposite direction only.
 
-Marking a task done from the keyboard, plain-task glyph, card or bulk panel closes its idle linked pane with `tern close <id>`, then clears `links.tern_pane` to null. The omp session and cwd stay linked. Tern has no confirmation or undo for closing a pane, so the pane stays open with `Pane left open (reason)` when:
+Marking a task done, archiving it, or moving it to Backlog closes its idle linked pane with `tern close <id>`, then clears `links.tern_pane` to null. This applies to keyboard, row, card and bulk actions. Archive preserves the done status. Backlog clears it. Restoring a task or moving it back to Tasks does not reopen its chat. The omp session and cwd stay linked. Tern has no confirmation or undo for closing a pane, so the pane stays open with `Pane left open (reason)` when:
 
 - The sampled omp state is working or waiting for input.
 - The omp state is unknown, or the foreground job is neither an idle shell nor idle/exited omp. The foreground process is checked with `tern process --json`.
 - The pane hosts this task block, another not-done task shares it, or the process check fails.
 
-A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 0.2 seconds old; a new job starting between the check and close is not protected by that earlier check.
+Pane closures initiated by Done, Archive or Backlog do not trigger automatic completion in other Todos blocks. Multiple blocks watching the same file preserve the requested task status.
+
+A dead pane ID is left unchanged. Bulk pane closure shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 0.2 seconds old; a new job starting between the check and close is not protected by that earlier check.
 
 Marking a task not done reopens its omp chat in a new tab with `omp --resume <id>` in the task cwd when it has a session but no live pane. A task without a session just becomes open; it does not start an agent. Repeated toggles are ignored while that task's close or reopen is in flight.
 
@@ -196,7 +198,7 @@ Existing `done_group` values from the older `todo-proto.settings` store migrate 
 | --- | --- | --- |
 | Show time on rows | on | no time at the right of rows, no `Updated ...` line in the card, no session file sampling |
 | Show row action icons | on | no idle Done, Move, Archive or Delete icons on rows; keyboard deletion still shows `Delete?`; the grip, keyboard shortcuts and bulk panel actions stay available |
-| Close pane when a task is done | on | marking done only changes the status; the linked pane stays open and linked |
+| Close pane on done, archive or backlog | on | done, archive and move to Backlog only change the task; the linked pane stays open and linked |
 | Reopen chat when a task is not done | on | marking not done only changes the status; the omp chat is not resumed |
 | Open pane when a task starts | on | starting or resuming a task still opens and links its tab, but leaves it in the background instead of switching to it |
 | Create new chats in a worktree | on | new chats start in the task's project directory without creating a Git worktree; existing chats always keep their directory |
