@@ -1,10 +1,9 @@
 --!strict
--- The `list` block: a Synara-style Tasks view over the JSON file named by args[1].
 -- The file is re-read every 5 seconds, except while a text field or popover has focus.
 --
 -- Keys (no field focused): j/k or up/down move, space or x toggles done, Enter
 -- focuses the linked pane, resumes the linked omp chat in a new tab, or starts
--- the task in omp; Tab or a adds a task, e edits the notes, F2 or n renames the task,
+-- the task in omp; Tab or a opens a new task card and the add field, e edits the notes, F2 or n renames the task,
 -- p picks the project, r reloads the file, z archives or restores, Delete or Backspace
 -- deletes (press twice), Z shows or hides the archived section. Alt+Up / Alt+Down (or
 -- cmd+shift+Up / Down) move the selected task one place within its group. Double-clicking a
@@ -37,7 +36,11 @@ local ui = tern.ui
 local session = require("./session")
 
 local POLL_MS = 5 * 1000
-local TERN = "/Users/delise/.local/bin/tern"
+-- fswatch reports a file change within about WATCH_LATENCY_S; POLL_MS stays as the fallback when it is missing or misses an event.
+local FSWATCH = "/opt/homebrew/bin/fswatch"
+local WATCH_LATENCY_S = "0.1"
+local WATCH_RUN_MS = 15 * 1000
+local TERN = require("./executable").tern_bin()
 local ROLE = "todo-proto."
 local PRIORITIES = { "none", "low", "medium", "high", "urgent" }
 local PRIORITY_LABEL: { [string]: string } = {
@@ -113,12 +116,14 @@ local SETTINGS: { { id: string, label: string, hint: string, default: boolean } 
 	{ id = "row_actions", label = "Show row action icons", hint = "Done, move to backlog, archive and delete buttons on hovered rows.", default = true },
 	{ id = "close_on_done", label = "Close pane when a task is done", hint = "Done closes the linked pane unless the agent is busy.", default = true },
 	{ id = "reopen_on_undone", label = "Reopen chat when a task is not done", hint = "Not done resumes the task's omp chat in a new tab.", default = true },
+	{ id = "focus_on_start", label = "Open pane when a task starts", hint = "Switch to the new tab right away. Off opens it in the background.", default = true },
 	{ id = "dblclick", label = "Double-click opens pane", hint = "Double-click does what Enter does: focus, resume or start.", default = true },
 	{ id = "archived", label = "Show archived section", hint = "The Archived list below the tasks.", default = true },
 	{ id = "badges", label = "Show badges on rows", hint = "Priority, pane and omp chips under the title.", default = true },
 	{ id = "status_line", label = "Show agent status on rows", hint = "Working, Needs you, Ready for you or Stopped under the title.", default = true },
 	{ id = "hints", label = "Show key hints", hint = "The line of keyboard shortcuts at the bottom of the block.", default = true },
 	{ id = "done_group", label = "Done tasks as a separate group", hint = "Collapse completed tasks into their own Done section.", default = false },
+	{ id = "omp_titles", label = "Task titles from omp", hint = "Linked tasks take the title omp gives their session; a typed title is only the prompt.", default = false },
 }
 
 
@@ -170,6 +175,7 @@ type State = {
 	-- nil (list keys).
 	focus: string?,
 	detail_open: boolean,
+	fresh: string?, -- a task created by Tab/a whose title has not been entered yet
 	add: Field,
 	-- Drafts of the focused detail fields, valid while focus == "title" / "notes".
 	notes: Field,
@@ -230,6 +236,8 @@ type State = {
 	sess_path: { [string]: string },
 	sess_tried: { [string]: number },
 	sess_busy: boolean,
+	-- True while an fswatch process waits for the next file change.
+	fsw: boolean,
 	-- The shared minute-aligned timer that refreshes the time labels.
 	tick: TimerHandle?,
 }
@@ -327,7 +335,22 @@ local function ordered(todos: { Todo }, tab: string, with_archived: boolean, wit
 end
 
 local function listed(state: State): { Todo }
-	return ordered(state.todos, state.tab, state.arch_open and state.cfg.archived, not state.cfg.done_group or state.done_open)
+	local all = ordered(state.todos, state.tab, state.arch_open and state.cfg.archived, not state.cfg.done_group or state.done_open)
+	if not state.fresh then
+		return all
+	end
+	local shown: { Todo } = {}
+	for _, t in all do
+		if t.id ~= state.fresh then
+			table.insert(shown, t)
+		end
+	end
+	return shown
+end
+
+-- The task created by Tab stays out of the list until Enter accepts its title.
+local function is_draft(state: State, t: Todo): boolean
+	return t.id == state.fresh
 end
 
 local function str_or_nil(v: any): string?
@@ -372,6 +395,9 @@ local function parse(text: string): ({ Todo }?, string?)
 end
 
 local function ensure_cursor(state: State)
+	if state.fresh and state.cursor == state.fresh then
+		return
+	end
 	local shown = listed(state)
 	for _, t in shown do
 		if t.id == state.cursor then
@@ -833,8 +859,16 @@ local function patch(state: State, id: string, change: (any) -> ())
 	end)
 end
 
+local LAST_PROJECT_KEY = "todo-proto.last_project"
+
+local function last_project(): string?
+	local ok, v = pcall(tern.kv.get, LAST_PROJECT_KEY)
+	return if ok then str_or_nil(v) else nil
+end
+
 local function add_task(state: State, title: string)
 	local new_id = ""
+	local cwd = last_project()
 	local written = rewrite(state, function(list)
 		local taken: { [string]: boolean } = {}
 		for _, item in list do
@@ -855,7 +889,7 @@ local function add_task(state: State, title: string)
 			due = tern.json.null,
 			done = false,
 			backlog = if state.tab == "backlog" then true else nil,
-			links = {},
+			links = if cwd then { cwd = cwd } else {},
 		})
 	end)
 	if written then
@@ -876,7 +910,16 @@ local function index_of(state: State): number
 end
 
 local function selected(state: State): Todo?
-	return listed(state)[index_of(state)]
+	local t = listed(state)[index_of(state)]
+	if t or not state.fresh or state.cursor ~= state.fresh then
+		return t
+	end
+	for _, draft in state.todos do
+		if is_draft(state, draft) then
+			return draft
+		end
+	end
+	return nil
 end
 
 local function todo_by_id(state: State, id: string): Todo?
@@ -1721,12 +1764,14 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 		if not alive(state) then
 			return
 		end
-		-- `tern new tab` leaves the new tab in the background: show it.
-		pcall(tern.process.run, { TERN, "focus", tostring(pane) }, { timeout_ms = 5000 }, function(shown: ProcessResult, _)
-			if shown.status ~= 0 then
-				state.cx:toast("error", "tern focus failed", shown.stderr)
-			end
-		end)
+		if state.cfg.focus_on_start then
+			-- `tern new tab` leaves the new tab in the background: show it.
+			pcall(tern.process.run, { TERN, "focus", tostring(pane) }, { timeout_ms = 5000 }, function(shown: ProcessResult, _)
+				if shown.status ~= 0 then
+					state.cx:toast("error", "tern focus failed", shown.stderr)
+				end
+			end)
+		end
 		patch(state, id, function(item)
 			local links = if type(item.links) == "table" then item.links else {}
 			links.tern_pane = pane
@@ -2367,7 +2412,46 @@ local function refresh(state: State)
 	load(state)
 end
 
--- A field being edited owns its text: the timer leaves the file alone then.
+-- tern.process.run hands back stdout only after the process ends, so one fswatch run waits for
+-- one batch of changes (or WATCH_RUN_MS, to pick up session files found since). The watcher is
+-- armed before the reload, so a change during the reload starts the next run instead of getting lost.
+local function sync(state: State)
+	poll_sessions(state)
+	-- A field being edited owns its text: the file is left alone then.
+	if state.focus == nil then
+		refresh(state)
+		state.cx:render()
+	end
+end
+
+local function watch_files(state: State)
+	if state.fsw or not alive(state) or not state.path then
+		return
+	end
+	local argv = { FSWATCH, "-1", "--latency", WATCH_LATENCY_S, state.path :: string }
+	if state.cfg.time then
+		for _, path in state.sess_path do
+			table.insert(argv, path)
+		end
+	end
+	state.fsw = true
+	local ok = pcall(tern.process.run, argv, { timeout_ms = WATCH_RUN_MS }, function(result: ProcessResult, _)
+		state.fsw = false
+		if not alive(state) then
+			return
+		end
+		if result.timed_out then
+			watch_files(state)
+		elseif result.status == 0 and result.stdout ~= "" then
+			watch_files(state)
+			sync(state)
+		end
+	end)
+	if not ok then
+		state.fsw = false
+	end
+end
+
 local function poll(state: State)
 	if not alive(state) or state.timer then
 		return
@@ -2378,17 +2462,13 @@ local function poll(state: State)
 			return
 		end
 		state.timer = nil
-		poll_sessions(state)
 		heartbeat()
-		if state.focus == nil then
-			refresh(state)
-			state.cx:render()
-		end
+		sync(state)
 		poll(state)
 	end)
 end
 
-local STATE_MS = 2000
+local STATE_MS = 200
 
 -- Samples window.luau's omp states every STATE_MS; renders only when they changed.
 local function poll_states(state: State)
@@ -2776,7 +2856,29 @@ local function save_field(state: State, f: Field, name: string, mode: string)
 	end)
 end
 
+-- Removes a just-created task that Enter never accepted.
+local function drop_fresh(state: State)
+	local id = state.fresh
+	state.fresh = nil
+	if not id then
+		return
+	end
+	rewrite(state, function(list)
+		for i, item in list do
+			if type(item) == "table" and item.id == id then
+				table.remove(list, i)
+				return true
+			end
+		end
+		return false
+	end)
+	ensure_cursor(state)
+end
+
 local function set_focus(state: State, field: string?)
+	if state.focus == "add" and state.fresh and field ~= "add" and field ~= "picker" then
+		drop_fresh(state)
+	end
 	if state.focus == "title" and field ~= "title" then
 		save_field(state, state.title, "title", "commit")
 		state.title.task = nil
@@ -2818,6 +2920,26 @@ local function set_focus(state: State, field: string?)
 	state.cx:frame({ { "focus", id } })
 end
 
+-- Tab / a: creates an empty task with the last used project, opens its card and puts the
+-- caret in the add field, whose text becomes the task title while it is typed.
+local function new_task(state: State)
+	set_focus(state, nil)
+	reset_field(state.add, "")
+	add_task(state, "")
+	state.fresh = state.cursor
+	set_focus(state, "add")
+end
+
+local function sync_fresh_title(state: State)
+	local id = state.fresh
+	local title = trim(state.add.text)
+	if id and title ~= "" then
+		patch(state, id, function(item)
+			item.title = title
+		end)
+	end
+end
+
 -- Rename: focuses the title with its whole text selected, as Synara's inline rename does.
 local function begin_rename(state: State)
 	if not selected(state) then
@@ -2843,7 +2965,9 @@ end
 -- Writes what a changed field holds: the detail fields go to the file, a popover's search
 -- resets the highlighted row.
 local function field_changed(state: State)
-	if state.focus == "title" then
+	if state.focus == "add" then
+		sync_fresh_title(state)
+	elseif state.focus == "title" then
 		save_field(state, state.title, "title", "live")
 	elseif state.focus == "notes" then
 		save_field(state, state.notes, "notes", "live")
@@ -3061,7 +3185,7 @@ end
 
 local function close_picker(state: State)
 	state.pick = nil
-	set_focus(state, nil)
+	set_focus(state, if state.fresh then "add" else nil)
 end
 
 open_settings = function(state: State)
@@ -3114,6 +3238,9 @@ local function apply_pick(state: State, kind: string, value: string?)
 	close_picker(state)
 	if not pk then
 		return
+	end
+	if kind == "project" then
+		pcall(tern.kv.set, LAST_PROJECT_KEY, value or "")
 	end
 	patch(state, pk.task, function(item)
 		local null = tern.json.null
@@ -3204,14 +3331,25 @@ local function field_key(state: State, key: Key): boolean
 		if what == nil then
 			return false
 		elseif what == "blur" then
+			local discard = state.fresh ~= nil
 			set_focus(state, nil)
+			if discard then
+				reset_field(state.add, "")
+			end
 		elseif what == "submit" then
 			local title = trim(state.add.text)
 			if title ~= "" then
-				add_task(state, title)
+				if state.fresh then
+					sync_fresh_title(state)
+				else
+					add_task(state, title)
+				end
+				state.fresh = nil
 				reset_field(state.add, "")
-				set_focus(state, "add")
+				set_focus(state, nil)
 			end
+		elseif what == "text" then
+			sync_fresh_title(state)
 		end
 		return true
 	end
@@ -3273,7 +3411,7 @@ local function open_count(state: State): number
 	local want = state.tab == "backlog"
 	local open = 0
 	for _, t in state.todos do
-		if not t.done and not t.archived and in_backlog(t) == want then
+		if not t.done and not t.archived and in_backlog(t) == want and not is_draft(state, t) then
 			open += 1
 		end
 	end
@@ -3284,7 +3422,7 @@ local function tab_count(state: State): number
 	local want = state.tab == "backlog"
 	local n = 0
 	for _, t in state.todos do
-		if not t.archived and in_backlog(t) == want then
+		if not t.archived and in_backlog(t) == want and not is_draft(state, t) then
 			n += 1
 		end
 	end
@@ -3294,7 +3432,7 @@ end
 local function backlog_count(state: State): number
 	local n = 0
 	for _, t in state.todos do
-		if in_backlog(t) then
+		if in_backlog(t) and not is_draft(state, t) then
 			n += 1
 		end
 	end
@@ -3518,7 +3656,9 @@ local function left_view(state: State): Node
 	end
 	local rows: { Node } = {}
 	for _, t in ordered(state.todos, state.tab, false, not state.cfg.done_group) do
-		table.insert(rows, row_view(state, t, live, lifted, pos))
+		if not is_draft(state, t) then
+			table.insert(rows, row_view(state, t, live, lifted, pos))
+		end
 	end
 	local done_n = done_count(state)
 	if state.cfg.done_group and done_n > 0 then
@@ -3892,14 +4032,35 @@ local function settings_key(state: State, key: Key): boolean
 	return true
 end
 
-local function hint_view(): Node
-	local card = ui.card({ ui.span("Todo Prototype", "strong") }, {
-		ui.md("No data file given. Open this block with the path to the JSON file as its argument."),
-	})
-	local p: { [string]: any } = card.p or {}
-	p.tone = "muted"
-	card.p = p
-	return card
+local function task_path(args: { string }): (string?, string?)
+	if args[1] then
+		return args[1], nil
+	end
+	local ok, last = pcall(tern.kv.get, "todo-proto.file")
+	if not ok then
+		return nil, "Cannot read the last task file setting: " .. tostring(last)
+	end
+	local path: string
+	if type(last) == "string" and last ~= "" then
+		path = last
+	else
+		local home = tern.getenv("HOME")
+		if not home or home == "" then
+			return nil, "HOME is not set on this host. Open an explicit task file or set HOME for the Tern daemon."
+		end
+		path = string.gsub(home, "/+$", "") .. "/todos.todo.json"
+	end
+	local exists_ok, exists = pcall(tern.fs.exists, path)
+	if not exists_ok then
+		return nil, "Cannot check task file " .. path .. ": " .. tostring(exists)
+	end
+	if not exists then
+		local wrote, reason = pcall(tern.fs.write, path, tern.json.encode({ todos = tern.json.array() }, true) .. "\n")
+		if not wrote then
+			return nil, "Cannot create task file " .. path .. ": " .. tostring(reason)
+		end
+	end
+	return path, nil
 end
 
 local function root(children: { Node }): Node
@@ -3916,15 +4077,17 @@ tern.block.define("list", {
 		if previous then
 			retire(previous)
 		end
+		local path, path_error = task_path(args)
 		local state: State = {
 			cx = cx,
-			path = args[1],
+			path = path,
 			todos = {},
 			cursor = nil,
-			error = nil,
+			error = path_error,
 			timer = nil,
 			focus = nil,
 			detail_open = true,
+			fresh = nil,
 			add = new_field("", false, nil),
 			notes = new_field("", true, nil),
 			title = new_field("", false, TITLE_MAX),
@@ -3963,6 +4126,7 @@ tern.block.define("list", {
 			sess_path = {},
 			sess_tried = {},
 			sess_busy = false,
+			fsw = false,
 			tick = nil,
 		}
 		running[cx.pane] = state
@@ -3980,6 +4144,7 @@ tern.block.define("list", {
 		if state.path then
 			load(state)
 			poll(state)
+			watch_files(state)
 			scan_chats(state, nil)
 			update_states(state)
 			poll_states(state)
@@ -3995,10 +4160,6 @@ tern.block.define("list", {
 	end,
 
 	view = function(state: State, _cx: BlockCx): BlockView
-		if not state.path then
-			return { main = root({ hint_view() }) }
-		end
-		refresh_cfg(state)
 		if state.error then
 			local card = ui.card({ ui.span("Could not load todos", "strong") }, { ui.md(state.error) })
 			local p: { [string]: any } = card.p or {}
@@ -4006,6 +4167,7 @@ tern.block.define("list", {
 			card.p = p
 			return { main = root({ card }) }
 		end
+		refresh_cfg(state)
 		local cols: { Node } = { left_view(state) }
 		local t = selected(state)
 		local picked_ids = multi_ids(state)
@@ -4107,7 +4269,7 @@ tern.block.define("list", {
 				activate(state, t)
 			end
 		elseif key.name == "tab" or k == "a" then
-			set_focus(state, "add")
+			new_task(state)
 		elseif k == "e" then
 			set_focus(state, "notes")
 		elseif key.name == "f2" or k == "n" then

@@ -9,7 +9,7 @@
       "done": false,
       "links": {
         "tern_pane": 274877906945,
-        "cwd": "/Users/delise/projects/slop",
+        "cwd": "/Users/me/projects/example",
         "omp_session": "a1b2c3d4"
       }
     },
@@ -20,7 +20,7 @@
       "priority": "urgent",
       "due": "2026-10-13",
       "done": false,
-      "links": { "tern_pane": 223338299407, "cwd": "/Users/delise/projects/prism", "omp_session": null }
+      "links": { "tern_pane": 223338299407, "cwd": "/Users/me/projects/another", "omp_session": null }
     },
     {
       "id": "t3",
@@ -47,7 +47,7 @@
       "priority": "none",
       "due": "2026-10-20",
       "done": false,
-      "links": { "tern_pane": 999999999999, "cwd": "/Users/delise/projects/prism", "omp_session": "c9d0e1f2" }
+      "links": { "tern_pane": 999999999999, "cwd": "/Users/me/projects/another", "omp_session": "c9d0e1f2" }
     }
   ]
 }

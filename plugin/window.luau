@@ -9,6 +9,23 @@ tern.route.open(function(req, _cx)
 	return nil
 end)
 
+tern.command({
+	id = "open",
+	title = "Todo: open tasks",
+	group = "Todo",
+	icon = "check",
+	run = function(cx: WindowCx)
+		local ok, pane = pcall(function()
+			return cx:new_block("todo-proto.list", {})
+		end)
+		if not ok then
+			cx:toast("error", "Cannot open Todo on this host", "The host plugin failed: " .. tostring(pane))
+		elseif not pane then
+			cx:toast("error", "Todo plugin is not ready on this host", "Install github.com/deLiseLINO/tern-todo/plugin on this host and check tern plugin list for errors.")
+		end
+	end,
+})
+
 -- omp agent states for the Todos block. Only the window half can read agent blocks
 -- (cx.agents:list), so it samples them and hands the result to the host half through
 -- tern.kv:
@@ -16,7 +33,7 @@ end)
 --   window -> "states": { [pane id as string] = "working" | "waiting_input" | "idle" | "exited" }
 -- The window samples only while "watch" is fresh and writes only when the states changed.
 -- `busy` follows the omp turn; the progress escape can outlive it.
-local SAMPLE_MS = 2000
+local SAMPLE_MS = 200
 local WATCH_FRESH_S = 15
 
 local last_sig = ""
@@ -116,7 +133,7 @@ end)
 -- there. The id in the file name is what `omp --resume <id>` resolves. The title is read from the
 -- first line of that file (omp's fixed-width title slot), so no glyph or PR suffix from the pane
 -- title is involved.
-local TERN = "/Users/delise/.local/bin/tern"
+local tern_bin = require("./executable").tern_bin
 local FILE_KEY = "todo-proto.file"
 local NUDGE_KEY = "todo-proto.nudge"
 local WRITE_TRIES = 3
@@ -359,7 +376,7 @@ local function add_omp_session(cx: WindowCx)
 		(cx2 or cx):toast("error", text, sub)
 	end
 
-	tern.process.run({ TERN, "inspect", "--json" }, { timeout_ms = 8000 }, function(result, cx1)
+	tern.process.run({ tern_bin(), "inspect", "--json" }, { timeout_ms = 8000 }, function(result, cx1)
 		if result.status ~= 0 then
 			fail(cx1, "Cannot list Tern panes", result.stderr)
 			return
@@ -492,10 +509,66 @@ end
 
 type Candidate = { pane: number, cwd: string, file: string, id: string, pane_title: string }
 
-local function import_next(path: string, queue: { Candidate }, index: number)
-	local c = queue[index]
+local function omp_titles_on(): boolean
+	local ok, v = pcall(tern.kv.get, "settings")
+	return ok and type(v) == "table" and v.omp_titles == true
+end
+
+local function bump_nudge(path: string)
+	local okv, old = pcall(tern.kv.get, NUDGE_KEY)
+	local n = if okv and type(old) == "table" and type(old.n) == "number" then old.n + 1 else 1
+	pcall(tern.kv.set, NUDGE_KEY, { path = path, n = n })
+end
+
+-- Setting "Task titles from omp": every scan, a task linked to a live omp session takes the
+-- title omp gave that session. Only omp's own title counts (the title slot or session header),
+-- never the pane title, so an unnamed session leaves the task's title alone. A block write
+-- that lands between our read and write is harmless: the next scan applies the title again.
+local function sync_titles(path: string, all: { Candidate }, index: number, titles: { [string]: string })
+	local c = all[index]
 	if not c then
 		auto_busy = false
+		if next(titles) == nil then
+			return
+		end
+		local changed = edit_file(path, function(list)
+			local touched = false
+			for _, item in list do
+				local links = if type(item) == "table" then item.links else nil
+				local want = if type(links) == "table" and is_text(links.omp_session) then titles[links.omp_session] else nil
+				if want and item.title ~= want then
+					item.title = want
+					item.updated = iso_now()
+					touched = true
+				end
+			end
+			return touched
+		end)
+		if changed then
+			bump_nudge(path)
+		end
+		return
+	end
+	tern.process.run({ "/usr/bin/head", "-n", "2", "--", c.file }, { timeout_ms = 5000 }, function(head, _)
+		if head.status == 0 then
+			local title, id = session.read_head(head.stdout)
+			title = strip_glyph((string.gsub(title, "%s+", " ")))
+			if id == c.id and title ~= "" then
+				titles[c.id] = title
+			end
+		end
+		sync_titles(path, all, index + 1, titles)
+	end)
+end
+
+local function import_next(path: string, queue: { Candidate }, index: number, all: { Candidate })
+	local c = queue[index]
+	if not c then
+		if omp_titles_on() and #all > 0 then
+			sync_titles(path, all, 1, {})
+		else
+			auto_busy = false
+		end
 		return
 	end
 	tern.process.run({ "/usr/bin/head", "-n", "2", "--", c.file }, { timeout_ms = 5000 }, function(head, _)
@@ -513,14 +586,12 @@ local function import_next(path: string, queue: { Candidate }, index: number)
 				if outcome then
 					mark_seen(c.id)
 					if outcome ~= "exists" then
-						local okv, old = pcall(tern.kv.get, NUDGE_KEY)
-						local n = if okv and type(old) == "table" and type(old.n) == "number" then old.n + 1 else 1
-						pcall(tern.kv.set, NUDGE_KEY, { path = path, n = n })
+						bump_nudge(path)
 					end
 				end
 			end
 		end
-		import_next(path, queue, index + 1)
+		import_next(path, queue, index + 1, all)
 	end)
 end
 
@@ -537,29 +608,34 @@ local function auto_scan()
 		return
 	end
 	auto_busy = true
-	local started = pcall(tern.process.run, { TERN, "inspect", "--json" }, { timeout_ms = 8000 }, function(result, _)
+	local started = pcall(tern.process.run, { tern_bin(), "inspect", "--json" }, { timeout_ms = 8000 }, function(result, _)
 		local iok, doc = pcall(tern.json.decode, result.stdout)
 		local queue: { Candidate } = {}
+		local all: { Candidate } = {}
 		if result.status == 0 and iok and type(doc) == "table" and type(doc.panes) == "table" then
 			local seen = load_seen()
 			local queued: { [string]: boolean } = {}
 			for _, p in doc.panes do
 				if type(p) == "table" and type(p.pane) == "number" and is_text(p.omp_session_file) then
 					local id = string.match(p.omp_session_file, "_([%w%-]+)%.jsonl$")
-					if id and not seen[id] and not queued[id] then
+					if id and not queued[id] then
 						queued[id] = true
-						table.insert(queue, {
+						local cand: Candidate = {
 							pane = p.pane,
 							cwd = if type(p.cwd) == "string" then p.cwd else "",
 							file = p.omp_session_file,
 							id = id,
 							pane_title = if type(p.title) == "string" then strip_glyph(p.title) else "",
-						})
+						}
+						table.insert(all, cand)
+						if not seen[id] then
+							table.insert(queue, cand)
+						end
 					end
 				end
 			end
 		end
-		import_next(path, queue, 1)
+		import_next(path, queue, 1, all)
 	end)
 	if not started then
 		auto_busy = false

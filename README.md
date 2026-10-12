@@ -2,14 +2,72 @@
 
 A personal to-do list for Tern, a Synara-style Tasks block. It is a Luau plugin (`plugin/`, id `todo-proto`) over one JSON file. Tasks can link to a Tern pane, a working directory and an omp session, and can be handed to omp from the block.
 
-## Open the block
+## Install and open tasks
 
-```
-tern plugin link <path to>/tern-todo/plugin     # once
-tern open --split right my.todo.json             # any *.todo.json (or todos*.json, tern-todo*.json)
+Install [Tern](https://docs.stencil.so/tern/) and Git on the machine that runs the Tern daemon. Keep a Tern window open when you check plugin readiness.
+
+```sh
+tern plugin install github.com/deLiseLINO/tern-todo/plugin
+tern plugin list
 ```
 
-The file must be `{"todos": [...]}`. The block re-reads it every 5 s (not while a text field is focused) and when the palette command below changes it.
+The list must show `todo-proto` as ready. Check the window for plugin error toasts too, because `tern plugin list` does not report window-entry failures. In the command palette, run **Todo: open tasks**. You can also invoke the command from a terminal attached to that window:
+
+```sh
+tern ctl plugins run plugin.todo-proto.open
+```
+
+The command opens `todo-proto.list` without a file argument. The host selects its last task file from `tern.kv` key `todo-proto.file`, or `$HOME/todos.todo.json` if no file was saved. It creates `{"todos": []}` only when that file is absent. Existing files are read, not reset. An unreadable file, invalid JSON, a creation failure, or missing host `HOME` appears as an error in the block. A missing or failed host plugin produces a toast instead.
+
+To open a different file, pass its path explicitly:
+
+```sh
+tern open --split right /path/to/my.todo.json
+```
+
+An explicit path stays unchanged and takes precedence over the saved path and `HOME`. Create the file with `{"todos": []}` first. Explicit file opens do not create missing files. Routes accept `*.todo.json`; the manifest also accepts `todos*.json` and `tern-todo*.json`. An absolute path becomes the last task file for later no-argument opens.
+
+### Update an installed copy
+
+```sh
+tern plugin install github.com/deLiseLINO/tern-todo/plugin --force
+tern plugin list
+```
+
+`--force` replaces an installed copy, not a development link. Task files and plugin settings are separate from the installed package.
+
+### Link a development checkout
+
+Use a link only when you want Tern to load your working files in place:
+
+```sh
+git clone https://github.com/deLiseLINO/tern-todo.git
+tern plugin link ./tern-todo/plugin
+tern plugin list
+```
+
+To switch a linked package to a repository installation, run `tern plugin unlink todo-proto`, then install it with the command above. `tern plugin reload` reloads linked or installed code. Linking and reloading do not deliver `window_start` to an already open window.
+
+### Remote hosts
+
+Install the plugin on each Tern host where you want a Tasks block, then check `tern plugin list` on that host. Switch the window to that host before running **Todo: open tasks**. The command does not read a window-local file or saved path. The host chooses its own task file using its own `todo-proto.file` setting and `HOME`; it does not copy tasks from your local machine.
+
+This command supports host-local task opening. The existing window-side agent status, automatic omp import, add-session command, and settings requests use local processes or kv relays. They are not a complete cross-host integration. Do not rely on those relays to control or edit tasks on another host.
+
+### Requirements and platform limits
+
+- Tern must support Luau plugins and `WindowCx:new_block` on the current host. Git is required for repository installation and updates.
+- The daemon must receive `HOME` for a default task file. Set `TERN_BIN` to an absolute executable path if Tern is installed elsewhere. Each plugin half resolves it once, in this order: `TERN_BIN`, `$HOME/.local/bin/tern`, `/opt/homebrew/bin/tern`, `/usr/local/bin/tern`, `/usr/bin/tern`, then `tern` through its process environment's `PATH`. An explicit override is used as given. Restart the daemon or reload the plugin after changing its environment.
+- omp is optional for plain tasks, but required to start or resume agents and load models or chats. `OMP_BIN` overrides its location. Otherwise the host looks in `$HOME/.local/bin`, `$HOME/.bun/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, then tries `omp`.
+- The plugin calls Tern for pane inspection, focus, creation, process inspection, and closing. It calls `/usr/bin/head` for omp session headers, `/usr/bin/find` and `/usr/bin/stat` for session discovery and times, and `/bin/ls` for project directory completion.
+- `fswatch` is optional. The plugin expects `/opt/homebrew/bin/fswatch`, installed on Apple Silicon macOS with `brew install fswatch`. It reloads a changed file within about 0.2 seconds when the watcher runs, except while a text field has focus. A 5-second file poll is the fallback.
+- Repository installation and the basic JSON task list can run on macOS and Linux hosts with Tern plugins. Agent and session helpers still target macOS through BSD `stat -f` and fixed utility paths. Full Linux omp integration and Windows are not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
+
+### Files and state
+
+The plugin creates the host-selected default or last task file if absent, then rewrites the selected JSON file when you edit tasks. It preserves unknown keys and explicit nulls during those edits. Window-side omp import can also add tasks to the last selected file.
+
+Settings, the last absolute task file, the last selected project, agent samples, import history, and request counters go into the plugin's `tern.kv` store, `<data>/kv.json`. The plugin reads omp session headers and file metadata under `$HOME/.omp/agent/sessions`; it does not rewrite those sessions directly. Starting or resuming omp can make omp write its own session files. No runtime files are written into `plugin/`.
 
 ## Keys (no field focused)
 
@@ -18,7 +76,7 @@ The file must be `{"todos": [...]}`. The block re-reads it every 5 s (not while 
 | j / k, Up / Down | move |
 | Space, x | toggle done; with two or more tasks selected, mark all done, or not done when all are done. Done closes an idle linked pane; not done reopens a linked omp chat. See below for the safety rules. |
 | Enter | focus the linked pane; else resume the linked omp chat in a new tab; else start the task in omp |
-| Tab, a | add a task (type the title, Enter adds, Esc or Tab leaves the field) |
+| Tab, a | new task: opens its card with the last picked project preselected and puts the caret in the add field; the task is created, and appears in the list, only when Enter accepts the title; Esc or leaving the field discards it |
 | e | edit notes (Enter inserts a newline, Tab or a click elsewhere commits, Esc discards the draft) |
 | F2, n | rename the selected task (whole title selected; Enter, Tab or a click elsewhere commits, Esc discards the draft) |
 | p | pick the project (cwd) |
@@ -73,7 +131,7 @@ Marking a task done from the keyboard, plain-task glyph, card or bulk panel clos
 - The omp state is unknown, or the foreground job is neither an idle shell nor idle/exited omp. The foreground process is checked with `tern process --json`.
 - The pane hosts this task block, another not-done task shares it, or the process check fails.
 
-A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 2 seconds old; a new job starting between the check and close is not protected by that earlier check.
+A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 0.2 seconds old; a new job starting between the check and close is not protected by that earlier check.
 
 Marking a task not done reopens its omp chat in a new tab with `omp --resume <id>` in the task cwd when it has a session but no live pane. A task without a session just becomes open; it does not start an agent. Repeated toggles are ignored while that task's close or reopen is in flight.
 
@@ -88,7 +146,7 @@ Which moment counts:
 | Task | Moment |
 | --- | --- |
 | done | `completed` (falls back to `updated`, then `created`, when a done task has no `completed`) |
-| has a linked omp chat (not done) | the later of `updated` and the chat file's last activity (mtime of `~/.omp/agent/sessions/*/*_<id>.jsonl`, sampled with one `stat` on the 5 s file poll; the file is located once with `find`, retried every 20 s while it is missing) |
+| has a linked omp chat (not done) | the later of `updated` and the chat file's last activity (mtime of `~/.omp/agent/sessions/*/*_<id>.jsonl`, sampled with one `stat` after each `fswatch` event on a known chat file and on the 5 s file poll; the file is located once with `find`, retried every 20 s while it is missing) |
 | otherwise | `updated`, else `created` |
 | no valid stamp | no label |
 
@@ -96,9 +154,9 @@ Tasks created before this version have no stamps and show no label until the blo
 
 ## Settings
 
-The gear in the bottom right corner, the `,` key when no field has focus and the palette command `Todo: settings` open the same centred Settings sheet. The palette command `plugin.todo-proto.settings` works from the focused Todos block; elsewhere it toasts `Focus a Todos block first`. Click a row, or use Up / Down, j / k, Home / End, Space or Enter to flip the selected switch. Esc, `,`, the close button or a click outside closes it. A change applies at once; palette requests reach the block within about 2 seconds.
+The gear in the bottom right corner, the `,` key when no field has focus and the palette command `Todo: settings` open the same centred Settings sheet. The palette command `plugin.todo-proto.settings` works from the focused Todos block; elsewhere it toasts `Focus a Todos block first`. Click a row, or use Up / Down, j / k, Home / End, Space or Enter to flip the selected switch. Esc, `,`, the close button or a click outside closes it. A change applies at once; palette requests reach the block within about 0.2 seconds.
 
-Settings live in the plugin's kv under `settings` (`<data>/kv.json`), not in the todo file. They are shared by every Todos block and window; other blocks pick a change up within about 2 seconds and the values survive `tern plugin reload` and a restart. A key that was never set uses its default.
+Settings live in the plugin's kv under `settings` (`<data>/kv.json`), not in the todo file. They are shared by every Todos block and window; other blocks pick a change up within about 0.2 seconds and the values survive `tern plugin reload` and a restart. A key that was never set uses its default.
 
 Existing `done_group` values from the older `todo-proto.settings` store migrate once into `settings`, without overwriting values already there. The old store is removed after a successful migration; existing setting keys and defaults stay valid.
 
@@ -108,12 +166,14 @@ Existing `done_group` values from the older `todo-proto.settings` store migrate 
 | Show row action icons | on | no idle Done, Move, Archive or Delete icons on rows; keyboard deletion still shows `Delete?`; the grip, keyboard shortcuts and bulk panel actions stay available |
 | Close pane when a task is done | on | marking done only changes the status; the linked pane stays open and linked |
 | Reopen chat when a task is not done | on | marking not done only changes the status; the omp chat is not resumed |
+| Open pane when a task starts | on | starting or resuming a task still opens and links its tab, but leaves it in the background instead of switching to it |
 | Double-click opens pane | on | a double click only selects the row and opens its card |
 | Show archived section | on | the Archived header and its rows on the Tasks tab are hidden; Z does nothing; archiving still works. Backlog never shows archived tasks. |
 | Show badges on rows | on | no priority / pane / omp chips under the title |
 | Show agent status on rows | on | no Working / Needs you / Ready for you / Stopped line under the title (the card chip stays) |
 | Show key hints | on | no shortcut line at the bottom of the block |
 | Done tasks as a separate group | off | done tasks stay in the main list. When on, done tasks leave the main list and sit under a collapsed `Done (N)` header, above the Archived header. Click the header to expand it. Keyboard navigation and selection only see the done rows while the group is expanded. |
+| Task titles from omp | off | task titles stay as you typed them. When on, the 10 s scan (see "Automatic import") copies the title omp gave a session onto the task linked to it, even if you named the task yourself. A title you typed then works as the first prompt: it is sent to omp when you start the task, and omp's name replaces it afterwards. A renamed task is overwritten again at the next scan while omp's title differs. A session without an omp title leaves the task title alone. The scan runs only while a Todos block is open. |
 
 ## Order model
 
