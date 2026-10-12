@@ -2310,14 +2310,19 @@ close_task_panes = function(state: State, set: { [string]: boolean }, commit: ({
 				end
 			end
 			local key = tostring(g.pane)
-			local function mark_managed(value: boolean?)
+			local function mark_managed(value: boolean?): boolean
 				local raw = tern.kv.get("managed_closes")
 				local managed = if type(raw) == "table" then raw else {}
+				if value and managed[key] then
+					return false
+				end
 				managed[key] = value
 				tern.kv.set("managed_closes", managed)
+				return true
 			end
-			if not pcall(mark_managed, true) then
-				leave("cannot record pane closure")
+			local recorded, claimed = pcall(mark_managed, true)
+			if not recorded or not claimed then
+				leave(if recorded then "pane closure already in flight" else "cannot record pane closure")
 				settle()
 				continue
 			end
