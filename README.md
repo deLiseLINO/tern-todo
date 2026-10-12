@@ -34,7 +34,7 @@ tern plugin install github.com/deLiseLINO/tern-todo/plugin --force
 tern plugin list
 ```
 
-`--force` replaces an installed copy, not a development link. Task files and plugin settings are separate from the installed package.
+`--force` replaces an installed copy, not a development link. Task files and plugin settings are separate from the installed package. Each open block saves its selected path, so reloading does not switch it to a different block's last file.
 
 ### Link a development checkout
 

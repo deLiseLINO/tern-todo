@@ -4032,9 +4032,12 @@ local function settings_key(state: State, key: Key): boolean
 	return true
 end
 
-local function task_path(args: { string }): (string?, string?)
+local function task_path(args: { string }, saved: any): (string?, string?)
 	if args[1] then
 		return args[1], nil
+	end
+	if type(saved) == "table" and type(saved.path) == "string" and saved.path ~= "" then
+		return saved.path, nil
 	end
 	local ok, last = pcall(tern.kv.get, "todo-proto.file")
 	if not ok then
@@ -4072,12 +4075,12 @@ local function root(children: { Node }): Node
 end
 
 tern.block.define("list", {
-	init = function(cx: BlockCx, args: { string }, _saved: any): State
+	init = function(cx: BlockCx, args: { string }, saved: any): State
 		local previous = running[cx.pane]
 		if previous then
 			retire(previous)
 		end
-		local path, path_error = task_path(args)
+		local path, path_error = task_path(args, saved)
 		local state: State = {
 			cx = cx,
 			path = path,
@@ -4152,6 +4155,10 @@ tern.block.define("list", {
 			start_tick(state)
 		end
 		return state
+	end,
+
+	save = function(state: State): any
+		return { path = state.path }
 	end,
 
 	features = { "edit", "undo" },
