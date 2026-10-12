@@ -216,7 +216,7 @@ The order of the `todos` array in the JSON file is the order of the list inside 
 
 - Dropping on a task of the same group puts the moved task in that task's place: above it when it came from below, below it when it came from above. Every position of the group is reachable (drop on the first row for the top, on the last row for the bottom).
 - Dropping on a task of another group puts the moved task at the near edge of its own group: an open task dropped on a done row goes to the end of the open tasks; a done task dropped on an open row goes to the start of the done tasks; an archived task dropped on an open or done row goes to the start of the archived tasks. Tasks never change their done or archived state by moving.
-- The moved task stays selected. New tasks are still added at the end of the array.
+- The moved task stays selected. New tasks are inserted at the beginning of the array, so they appear first in Tasks or Backlog. This also applies to the palette command and automatic omp import. Existing tasks keep their relative order.
 
 ## Palette command: add an omp session to tasks
 
