@@ -145,6 +145,8 @@ Marking a task not done reopens its omp chat in a new tab with `omp --resume <id
 
 Start links the exact saved omp session reported by the new pane, not the newest chat in the project directory. If no saved session is reported within about 20 seconds, the pane remains linked and the chat ID stays unset.
 
+The task card has a **Create new chat in a worktree** checkbox, enabled by default and shared through Settings. A new chat creates a Git branch and worktree under `~/.omp/wt/` from the project's default origin branch, or `main` or `master` when no default origin branch is recorded. The task keeps the worktree directory in `links.cwd`, so reopening its chat uses the same directory. With the checkbox off, Start uses the task's project directory. Existing chats never create a worktree when resumed. A non-Git directory or a failed worktree creation shows an error and does not start omp. Worktrees remain after a pane closes or a task is deleted.
+
 The agent status stays `Needs you` while an omp `ask` question is visible in the editor, even when the approval layer is empty.
 
 ## Row time
@@ -177,6 +179,7 @@ Existing `done_group` values from the older `todo-proto.settings` store migrate 
 | Close pane when a task is done | on | marking done only changes the status; the linked pane stays open and linked |
 | Reopen chat when a task is not done | on | marking not done only changes the status; the omp chat is not resumed |
 | Open pane when a task starts | on | starting or resuming a task still opens and links its tab, but leaves it in the background instead of switching to it |
+| Create new chats in a worktree | on | new chats start in the task's project directory without creating a Git worktree; existing chats always keep their directory |
 | Double-click opens pane | on | a double click only selects the row and opens its card |
 | Show archived section | on | the Archived header and its rows on the Tasks tab are hidden; Z does nothing; archiving still works. Backlog never shows archived tasks. |
 | Show badges on rows | on | no priority / pane / omp chips under the title |
