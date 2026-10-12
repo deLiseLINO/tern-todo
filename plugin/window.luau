@@ -9,6 +9,23 @@ tern.route.open(function(req, _cx)
 	return nil
 end)
 
+tern.command({
+	id = "open",
+	title = "Todo: open tasks",
+	group = "Todo",
+	icon = "check",
+	run = function(cx: WindowCx)
+		local ok, pane = pcall(function()
+			return cx:new_block("todo-proto.list", {})
+		end)
+		if not ok then
+			cx:toast("error", "Cannot open Todo on this host", "The host plugin failed: " .. tostring(pane))
+		elseif not pane then
+			cx:toast("error", "Todo plugin is not ready on this host", "Install github.com/deLiseLINO/tern-todo/plugin on this host and check tern plugin list for errors.")
+		end
+	end,
+})
+
 -- omp agent states for the Todos block. Only the window half can read agent blocks
 -- (cx.agents:list), so it samples them and hands the result to the host half through
 -- tern.kv:
@@ -116,7 +133,7 @@ end)
 -- there. The id in the file name is what `omp --resume <id>` resolves. The title is read from the
 -- first line of that file (omp's fixed-width title slot), so no glyph or PR suffix from the pane
 -- title is involved.
-local TERN = "/Users/delise/.local/bin/tern"
+local tern_bin = require("./executable").tern_bin
 local FILE_KEY = "todo-proto.file"
 local NUDGE_KEY = "todo-proto.nudge"
 local WRITE_TRIES = 3
@@ -359,7 +376,7 @@ local function add_omp_session(cx: WindowCx)
 		(cx2 or cx):toast("error", text, sub)
 	end
 
-	tern.process.run({ TERN, "inspect", "--json" }, { timeout_ms = 8000 }, function(result, cx1)
+	tern.process.run({ tern_bin(), "inspect", "--json" }, { timeout_ms = 8000 }, function(result, cx1)
 		if result.status ~= 0 then
 			fail(cx1, "Cannot list Tern panes", result.stderr)
 			return
@@ -591,7 +608,7 @@ local function auto_scan()
 		return
 	end
 	auto_busy = true
-	local started = pcall(tern.process.run, { TERN, "inspect", "--json" }, { timeout_ms = 8000 }, function(result, _)
+	local started = pcall(tern.process.run, { tern_bin(), "inspect", "--json" }, { timeout_ms = 8000 }, function(result, _)
 		local iok, doc = pcall(tern.json.decode, result.stdout)
 		local queue: { Candidate } = {}
 		local all: { Candidate } = {}

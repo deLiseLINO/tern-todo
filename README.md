@@ -2,20 +2,78 @@
 
 A personal to-do list for Tern, a Synara-style Tasks block. It is a Luau plugin (`plugin/`, id `todo-proto`) over one JSON file. Tasks can link to a Tern pane, a working directory and an omp session, and can be handed to omp from the block.
 
+## Install and open tasks
+
+Install [Tern](https://docs.stencil.so/tern/) and Git on the machine that runs the Tern daemon. Keep a Tern window open when you check plugin readiness.
+
+```sh
+tern plugin install github.com/deLiseLINO/tern-todo/plugin
+tern plugin list
+```
+
+The list must show `todo-proto` as ready. Check the window for plugin error toasts too, because `tern plugin list` does not report window-entry failures. In the command palette, run **Todo: open tasks**. You can also invoke the command from a terminal attached to that window:
+
+```sh
+tern ctl plugins run plugin.todo-proto.open
+```
+
+The command opens `todo-proto.list` without a file argument. The host selects its last task file from `tern.kv` key `todo-proto.file`, or `$HOME/todos.todo.json` if no file was saved. It creates `{"todos": []}` only when that file is absent. Existing files are read, not reset. An unreadable file, invalid JSON, a creation failure, or missing host `HOME` appears as an error in the block. A missing or failed host plugin produces a toast instead.
+
+To open a different file, pass its path explicitly:
+
+```sh
+tern open --split right /path/to/my.todo.json
+```
+
+An explicit path stays unchanged and takes precedence over the saved path and `HOME`. Create the file with `{"todos": []}` first. Explicit file opens do not create missing files. Routes accept `*.todo.json`; the manifest also accepts `todos*.json` and `tern-todo*.json`. An absolute path becomes the last task file for later no-argument opens.
+
+### Update an installed copy
+
+```sh
+tern plugin install github.com/deLiseLINO/tern-todo/plugin --force
+tern plugin list
+```
+
+`--force` replaces an installed copy, not a development link. Task files and plugin settings are separate from the installed package. Each open block saves its selected path, so reloading does not switch it to a different block's last file.
+
+### Link a development checkout
+
+Use a link only when you want Tern to load your working files in place:
+
+```sh
+git clone https://github.com/deLiseLINO/tern-todo.git
+tern plugin link ./tern-todo/plugin
+tern plugin list
+```
+
+To switch a linked package to a repository installation, run `tern plugin unlink todo-proto`, then install it with the command above. `tern plugin reload` reloads linked or installed code. Linking and reloading do not deliver `window_start` to an already open window.
+
+### Remote hosts
+
+Install the plugin on each Tern host where you want a Tasks block, then check `tern plugin list` on that host. Switch the window to that host before running **Todo: open tasks**. The command does not read a window-local file or saved path. The host chooses its own task file using its own `todo-proto.file` setting and `HOME`; it does not copy tasks from your local machine.
+
+This command supports host-local task opening. The existing window-side agent status, automatic omp import, add-session command, and settings requests use local processes or kv relays. They are not a complete cross-host integration. Do not rely on those relays to control or edit tasks on another host.
+
+### Requirements and platform limits
+
+- Tern must support Luau plugins and `WindowCx:new_block` on the current host. Git is required for repository installation and updates.
+- The daemon must receive `HOME` for a default task file. Set `TERN_BIN` to an absolute executable path if Tern is installed elsewhere. Each plugin half resolves it once, in this order: `TERN_BIN`, `$HOME/.local/bin/tern`, `/opt/homebrew/bin/tern`, `/usr/local/bin/tern`, `/usr/bin/tern`, then `tern` through its process environment's `PATH`. An explicit override is used as given. Restart the daemon or reload the plugin after changing its environment.
+- omp is optional for plain tasks, but required to start or resume agents and load models or chats. `OMP_BIN` overrides its location. Otherwise the host looks in `$HOME/.local/bin`, `$HOME/.bun/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, then tries `omp`.
+- The plugin calls Tern for pane inspection, focus, creation, process inspection, and closing. It calls `/usr/bin/head` for omp session headers, `/usr/bin/find` and `/usr/bin/stat` for session discovery and times, and `/bin/ls` for project directory completion.
+- `fswatch` is optional. The plugin expects `/opt/homebrew/bin/fswatch`, installed on Apple Silicon macOS with `brew install fswatch`. It reloads a changed file within about 0.2 seconds when the watcher runs, except while a text field has focus. A 5-second file poll is the fallback.
+- Repository installation and the basic JSON task list can run on macOS and Linux hosts with Tern plugins. Agent and session helpers still target macOS through BSD `stat -f` and fixed utility paths. Full Linux omp integration and Windows are not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
+
+### Files and state
+
+The plugin creates the host-selected default or last task file if absent, then rewrites the selected JSON file when you edit tasks. It preserves unknown keys and explicit nulls during those edits. Window-side omp import can also add tasks to the last selected file.
+
+Settings, the last absolute task file, the last selected project, agent samples, import history, and request counters go into the plugin's `tern.kv` store, `<data>/kv.json`. The plugin reads omp session headers and file metadata under `$HOME/.omp/agent/sessions`; it does not rewrite those sessions directly. Starting or resuming omp can make omp write its own session files. No runtime files are written into `plugin/`.
+
 ## Contribute through GitHub
 
-The source repository is [deLiseLINO/tern-todo](https://github.com/deLiseLINO/tern-todo), with `main` as its default branch. Open code pull requests there, not in the parent GitLab repository.
+The source repository is [deLiseLINO/tern-todo](https://github.com/deLiseLINO/tern-todo), with `main` as its default branch. Open code pull requests there, not in the GitLab parent repository.
 
-When this project is checked out inside `slop`, it is a Git submodule. Create task worktrees from the tern-todo repository and follow `AGENTS.md`. The parent repository records only the submodule commit.
-
-## Open the block
-
-```
-tern plugin link <path to>/tern-todo/plugin     # once
-tern open --split right my.todo.json             # any *.todo.json (or todos*.json, tern-todo*.json)
-```
-
-The file must be `{"todos": [...]}`. The block reloads it within about 0.2 s of a change (not while a text field is focused), found by `fswatch` (`brew install fswatch`, expected at `/opt/homebrew/bin/fswatch`), and also re-reads it every 5 s as a fallback when `fswatch` is missing. The palette command below changes it the same way.
+When this project is checked out inside `slop`, it is a Git submodule. Create task worktrees from the tern-todo repository and follow `AGENTS.md`. The parent repository records the submodule commit and does not hold a second copy of the source.
 
 ## Keys (no field focused)
 

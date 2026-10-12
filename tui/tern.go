@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const ternBin = "/Users/delise/.local/bin/tern"
+const ternBin = "tern"
 
 type inspectDoc struct {
 	Sessions []struct {
