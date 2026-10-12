@@ -68,7 +68,7 @@ To toggle automatic installation from the attached window's terminal:
 tern ctl plugins run plugin.todo-proto.remote-auto-install
 ```
 
-Task opening and the manual add-session command use the selected host's task file. Window-side agent status, automatic omp import, and settings requests still use local processes or kv relays. They are not a complete cross-host integration. Do not rely on those remaining relays to control or edit tasks on another host.
+Task opening, manual and automatic session import, session discovery, and task writes use the selected host's files. The window sends host-scoped agent states and settings actions through Tern's native connection. Closing a pane completes its linked task on that host; losing the connection does not. Settings are stored separately on each host. Todo must be version 0.4.0 or later in the window and on every attached host for this integration. Automatic installation does not upgrade existing copies.
 
 ### Requirements and platform limits
 
@@ -79,13 +79,13 @@ Task opening and the manual add-session command use the selected host's task fil
 - omp is optional for plain tasks, but required to start or resume agents and load models or chats. `OMP_BIN` overrides its location. Otherwise the host looks in `$HOME/.local/bin`, `$HOME/.bun/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, then tries `omp`.
 - The plugin calls Tern for pane inspection, focus, creation, process inspection, and closing. It calls `/usr/bin/head` for omp session headers, `/usr/bin/find` and `/usr/bin/stat` for session discovery and times, and `/bin/ls` for project directory completion.
 - `fswatch` is optional. The plugin expects `/opt/homebrew/bin/fswatch`, installed on Apple Silicon macOS with `brew install fswatch`. It reloads a changed file within about 0.2 seconds when the watcher runs, except while a text field has focus. A 5-second file poll is the fallback.
-- Repository installation, the basic JSON task list, and manual omp-session import run on macOS and Linux hosts with Tern plugins. Other agent and session helpers still target macOS through BSD `stat -f` and fixed utility paths. Full Linux omp integration and Windows are not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
+- Task editing, omp-session import, chat and model selection, launch and resume, and pane lifecycle run on macOS and Linux hosts with Tern plugins. Session metadata uses BSD `stat -f` on macOS and GNU `stat -c` on Linux. Windows is not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
 
 ### Files and state
 
-The plugin creates the host-selected default or last task file if absent, then rewrites the selected JSON file when you edit tasks. It preserves unknown keys and explicit nulls during those edits. Window-side omp import can also add tasks to the last selected file.
+The plugin creates the host-selected default or last task file if absent, then rewrites the selected JSON file when you edit tasks. It preserves unknown keys and explicit nulls during those edits. Host-side omp import can also add tasks to the last selected file.
 
-Settings, the last absolute task file, the last selected project, agent samples, import history, and request counters go into the plugin's `tern.kv` store, `<data>/kv.json`. The plugin reads omp session headers and file metadata under `$HOME/.omp/agent/sessions`; it does not rewrite those sessions directly. Starting or resuming omp can make omp write its own session files. No runtime files are written into `plugin/`.
+Settings, the last absolute task file, the last selected project, import history, and reload counters go into the plugin's `tern.kv` store, `<data>/kv.json`. The plugin reads omp session headers and file metadata under `$HOME/.omp/agent/sessions`; it does not rewrite those sessions directly. Starting or resuming omp can make omp write its own session files. No runtime files are written into `plugin/`.
 
 ## Contribute through GitHub
 
@@ -238,7 +238,7 @@ Bind a chord in `settings.json` (`~/Library/Application Support/Tern/settings.js
 
 ## Automatic import of omp sessions
 
-While a Todos block is open, the plugin runs `tern inspect --json` every 10 s and adds every pane that runs omp with a saved session the file does not contain yet. The task gets the same links and title as the palette command, plus `created` and `updated` stamps, without a prompt. The open block reloads on its own. Imports go to Tasks, not Backlog.
+While a Todos block is open, its host runs `tern inspect --json` every 10 s and adds every pane that runs omp with a saved session the file does not contain yet. The task gets the same links and title as the palette command, plus `created` and `updated` stamps, without a prompt. The open block reloads on its own. Imports go to Tasks, not Backlog.
 
 - Each session is imported at most once (kept in the plugin kv `auto-seen`, last 500 ids). Deleting an imported task does not bring it back while its pane is alive.
 - A session whose file is not saved yet, or that has no title and an `omp` pane title, is retried on the next scan.
@@ -271,3 +271,5 @@ While a Todos block is open, the plugin runs `tern inspect --json` every 10 s an
 - The block rewrites the whole file on every edit with keys sorted alphabetically. Unknown keys and explicit nulls are preserved.
 - `links.tern_pane` is a pane id; it can go stale after a restart (the block then treats the task as not running).
 - `created`, `updated`, `completed`: ISO UTC strings the block maintains. `created` is set when a task is added through the block, palette command or automatic import. `updated` is set on every change of that task, including a move between Tasks and Backlog, title, notes, priority, level, model, project, chat and pane links, done and archive. Reordering within a list does not change stamps. `completed` is set when the task turns done and removed when it turns open. Moving lists keeps `created`; moving a done task to Backlog removes `completed`. Tasks the block did not change keep their values and unknown keys; external edits survive the read-modify-write.
+
+The Tasks workspace scrolls when its rows and detail card exceed the pane height. Keyboard hints stay on one clipped line in narrow splits, so the dock does not hide the task list.

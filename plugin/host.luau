@@ -29,6 +29,8 @@
 local ui = tern.ui
 local session = require("./session")
 require("./session-import")
+local auto_import = require("./auto-import")
+local session_files = require("./session-files")
 
 local POLL_MS = 5 * 1000
 -- fswatch reports a file change within about WATCH_LATENCY_S; POLL_MS stays as the fallback when it is missing or misses an event.
@@ -105,7 +107,6 @@ local SEARCH: { [string]: string } = {
 -- Settings (tern.kv "settings", shared by every Todos block and window; absent keys use
 -- their default). Each one gates something real below.
 local SETTINGS_KEY = "settings"
-local SETTINGS_REQ_KEY = "todo-proto.settings_req"
 local SETTINGS: { { id: string, label: string, hint: string, default: boolean } } = {
 	{ id = "time", label = "Show time on rows", hint = "How long ago a task was last touched, at the right of the row.", default = true },
 	{ id = "row_actions", label = "Show row action icons", hint = "Done, move to backlog, archive and delete buttons on hovered rows.", default = true },
@@ -187,9 +188,9 @@ type State = {
 	chats_token: number,
 	-- When the chat list was last rescanned for a linked chat it lacked, per session id.
 	chats_tried: { [string]: number },
-	-- omp state per linked pane ("working", "waiting_input", "idle", "exited"), written by
-	-- window.luau into tern.kv "states" and read here (see window.luau for the handshake).
 	agent_states: { [string]: string },
+	states_at: number,
+	previous_live: { [number]: boolean }?,
 	-- Test hook: tern.kv "todo-proto.debug_states" ({ [pane id string] = state word })
 	-- replaces live detection for those panes. Words: starting, running/working, needs/waiting_input,
 	-- review/idle, stopped/exited, todo.
@@ -230,7 +231,6 @@ type State = {
 	settings_open: boolean,
 	settings_sel: number,
 	settings_tap: { id: string, at: number }?,
-	settings_req: number,
 	sess_mtime: { [string]: number },
 	sess_path: { [string]: string },
 	sess_tried: { [string]: number },
@@ -649,19 +649,6 @@ local function toggle_setting(state: State, id: string)
 	apply_settings(state)
 end
 
--- The palette command (window.luau) writes { pane, n } to tern.kv "todo-proto.settings_req";
--- the block of that pane opens its sheet on its next state tick.
-local function settings_requested(state: State): boolean
-	local ok, v = pcall(tern.kv.get, SETTINGS_REQ_KEY)
-	if ok and type(v) == "table" and type(v.n) == "number" and v.n ~= state.settings_req then
-		state.settings_req = v.n
-		if v.pane == state.cx.pane then
-			open_settings(state)
-			return true
-		end
-	end
-	return false
-end
 
 -- One timer for the whole list, first fired on the next minute boundary, then every minute.
 local function start_tick(state: State)
@@ -1575,7 +1562,7 @@ local function scan_chats(state: State, cwd: string?)
 	end
 	local ok = pcall(
 		tern.process.run,
-		{ "/usr/bin/find", sessions_root(), "-maxdepth", "2", "-name", "*.jsonl", "-exec", "/usr/bin/stat", "-f", "%m %N", "{}", "+" },
+		session_files.find_argv(sessions_root()),
 		{ timeout_ms = 8000 },
 		function(found: ProcessResult, _)
 			if not alive(state) or state.chats_token ~= token then
@@ -1937,7 +1924,7 @@ local function status_of(state: State, t: Todo, live: { [number]: boolean }): st
 			kind = "starting"
 		end
 	end
-	kind = kind or (if t.links.omp_session then "stopped" else "todo")
+	kind = kind or "todo"
 	if kind ~= "running" then
 		state.since[pane] = nil
 	elseif not state.since[pane] then
@@ -1970,18 +1957,9 @@ local function agent_line(state: State, t: Todo, kind: string): string?
 	return nil
 end
 
--- Reads window.luau's states and the debug hook; returns whether anything changed.
 local function update_states(state: State): boolean
-	local states: { [string]: string } = {}
+	local states = if tern.now() - state.states_at <= 15000 then state.agent_states else {}
 	local debug: { [string]: string } = {}
-	local ok, raw = pcall(tern.kv.get, "states")
-	if ok and type(raw) == "table" then
-		for k, v in raw do
-			if type(v) == "string" then
-				states[tostring(k)] = v
-			end
-		end
-	end
 	local dok, draw = pcall(tern.kv.get, "todo-proto.debug_states")
 	if dok and type(draw) == "table" then
 		for k, v in draw do
@@ -1991,24 +1969,18 @@ local function update_states(state: State): boolean
 		end
 	end
 	local live = live_panes()
-	local ok_closed, raw_closed = pcall(tern.kv.get, "closed_panes")
-	local events = if ok_closed and type(raw_closed) == "table" then raw_closed else {}
 	local ok_managed, raw_managed = pcall(tern.kv.get, "managed_closes")
 	local managed = if ok_managed and type(raw_managed) == "table" then raw_managed else {}
-	local seen = state.closed_panes
-	local closed: { [string]: boolean } = {}
-	if seen then
-		for pane in events do
-			if not seen[pane] and not managed[pane] then
-				closed[pane] = true
+	local closed = state.closed_panes or {}
+	if state.previous_live then
+		for pane in state.previous_live do
+			if not live[pane] and not managed[tostring(pane)] then
+				closed[tostring(pane)] = true
 			end
 		end
-	else
-		state.closed_panes = events
 	end
-	if next(closed) == nil then
-		state.closed_panes = events
-	end
+	state.previous_live = live
+	state.closed_panes = closed
 	local completed = false
 	if state.focus == nil and next(state.closing) == nil and next(state.launching) == nil and next(closed) ~= nil then
 		local matched: boolean? = nil
@@ -2029,7 +2001,7 @@ local function update_states(state: State): boolean
 			return changed
 		end)
 		if completed or matched == false then
-			state.closed_panes = events
+			state.closed_panes = {}
 		end
 	end
 	local panes: { number } = {}
@@ -2047,9 +2019,6 @@ local function update_states(state: State): boolean
 	return true
 end
 
--- window.luau's `add-omp-session` command writes the file itself and bumps
--- kv "todo-proto.nudge" = { path, n }; reloading here shows the new task within a state tick.
--- A focused field keeps its text, so the nudge stays pending until the field is left.
 local function nudge_n(state: State): number?
 	local ok, v = pcall(tern.kv.get, "todo-proto.nudge")
 	if ok and type(v) == "table" and v.path == state.path and type(v.n) == "number" then
@@ -2068,7 +2037,6 @@ local function reload_if_nudged(state: State): boolean
 	return true
 end
 
--- Tells window.luau a todo block is watching, so it samples omp agents (see window.luau).
 local function heartbeat()
 	pcall(tern.kv.set, "watch", os.time())
 end
@@ -2562,25 +2530,10 @@ local function poll_sessions(state: State)
 		end
 	end
 	if #paths > 0 then
-		local argv = { "/usr/bin/stat", "-f", "%m %N" }
-		for _, p in paths do
-			table.insert(argv, p)
-		end
-		run(argv)
+		run(session_files.stat_argv(paths))
 	end
 	if #unknown > 0 then
-		local argv = { "/usr/bin/find", sessions_root(), "-maxdepth", "2", "(" }
-		for i, id in unknown do
-			if i > 1 then
-				table.insert(argv, "-o")
-			end
-			table.insert(argv, "-name")
-			table.insert(argv, "*_" .. id .. ".jsonl")
-		end
-		for _, a in { ")", "-exec", "/usr/bin/stat", "-f", "%m %N", "{}", "+" } do
-			table.insert(argv, a)
-		end
-		run(argv)
+		run(session_files.find_argv(sessions_root(), unknown))
 	end
 end
 
@@ -2661,9 +2614,6 @@ local function poll_states(state: State)
 		state.st_timer = nil
 		local changed = update_states(state)
 		if refresh_cfg(state) then
-			changed = true
-		end
-		if settings_requested(state) then
 			changed = true
 		end
 		if reload_if_nudged(state) then
@@ -4289,6 +4239,8 @@ tern.block.define("list", {
 			chats_token = 0,
 			chats_tried = {},
 			agent_states = {},
+			states_at = 0,
+			previous_live = nil,
 			debug_states = {},
 			states_sig = "",
 			closed_panes = nil,
@@ -4312,7 +4264,6 @@ tern.block.define("list", {
 			settings_open = false,
 			settings_sel = 1,
 			settings_tap = nil,
-			settings_req = 0,
 			sess_mtime = {},
 			sess_path = {},
 			sess_tried = {},
@@ -4321,17 +4272,11 @@ tern.block.define("list", {
 			tick = nil,
 		}
 		running[cx.pane] = state
-		-- The add-omp-session command (window.luau) writes into the most recently opened file.
 		if state.path and string.sub(state.path, 1, 1) == "/" then
 			pcall(tern.kv.set, "todo-proto.file", state.path)
 		end
 		state.nudge_seen = nudge_n(state) or 0
-		do
-			local rok, req = pcall(tern.kv.get, SETTINGS_REQ_KEY)
-			if rok and type(req) == "table" and type(req.n) == "number" then
-				state.settings_req = req.n
-			end
-		end
+		auto_import.arm()
 		if state.path then
 			load(state)
 			poll(state)
@@ -4506,6 +4451,23 @@ tern.block.define("list", {
 	end,
 
 	event = function(state: State, ev: UiEvent, _cx: BlockCx)
+		if ev.ev == "action" and ev.act == "todo.states" then
+			local ok, snapshot = pcall(tern.json.decode, if type(ev.json) == "string" then ev.json else "")
+			if ok and type(snapshot) == "table" and type(snapshot.states) == "table" then
+				local states: { [string]: string } = {}
+				for key, word in snapshot.states do
+					if type(key) == "string" and type(word) == "string" then
+						states[key] = word
+					end
+				end
+				state.agent_states = states
+				state.states_at = tern.now()
+			end
+			return
+		elseif ev.ev == "action" and ev.act == "todo.settings" then
+			open_settings(state)
+			return
+		end
 		if state.settings_open then
 			if (ev.ev == "select" or ev.ev == "activate") and type(ev.item) == "string" then
 				for i, s in SETTINGS do
