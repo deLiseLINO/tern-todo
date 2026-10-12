@@ -133,6 +133,8 @@ Bulk archive, restore and delete each use one read-modify-write by task id. Bulk
 
 ## Done and the pane
 
+Closing a linked tab or pane marks its tasks done, records the completion time, and clears `links.tern_pane`. The omp session and cwd stay linked. This works while a Todos block watches the file, even when that block is in a background tab. Completion waits until you leave an active text field. A pane ID already missing when the block opens does not complete a task. Exiting omp without closing its pane does not complete a task. The `Close pane when a task is done` setting controls the opposite direction only.
+
 Marking a task done from the keyboard, plain-task glyph, card or bulk panel closes its idle linked pane with `tern close <id>`, then clears `links.tern_pane` to null. The omp session and cwd stay linked. Tern has no confirmation or undo for closing a pane, so the pane stays open with `Pane left open (reason)` when:
 
 - The sampled omp state is working or waiting for input.

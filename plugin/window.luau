@@ -39,6 +39,7 @@ local WATCH_FRESH_S = 15
 local last_sig = ""
 local armed = false
 local previous: { [string]: string } = {}
+local previous_panes: { [number]: boolean } = {}
 local saved_ok, saved = pcall(tern.kv.get, "states")
 if saved_ok and type(saved) == "table" then
 	for key, value in saved do
@@ -79,6 +80,25 @@ local function sample(cx: WindowCx)
 	if not ok or type(watch) ~= "number" or os.time() - watch > WATCH_FRESH_S then
 		return
 	end
+	local panes: { [number]: boolean } = {}
+	for _, pane in cx.session:panes() do
+		panes[pane.pane] = true
+	end
+	local closed: { [number]: boolean } = {}
+	for pane in previous_panes do
+		if not panes[pane] then
+			closed[pane] = true
+		end
+	end
+	if next(closed) ~= nil then
+		local recorded = tern.kv.get("closed_panes")
+		local events = if type(recorded) == "table" then recorded else {}
+		for pane in closed do
+			events[tostring(pane)] = true
+		end
+		tern.kv.set("closed_panes", events)
+	end
+	previous_panes = panes
 	local lok, list = pcall(function()
 		return cx.agents:list()
 	end)
@@ -123,6 +143,7 @@ local function sample(cx: WindowCx)
 		end
 	end
 end
+
 
 local function arm()
 	if armed then

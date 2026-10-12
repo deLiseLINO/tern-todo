@@ -198,6 +198,7 @@ type State = {
 	-- review/idle, stopped/exited, todo.
 	debug_states: { [string]: string },
 	states_sig: string,
+	closed_panes: { [string]: boolean }?,
 	st_timer: TimerHandle?,
 	-- Counter of window.luau's "todo-proto.nudge" already handled (see `reload_if_nudged`).
 	nudge_seen: number,
@@ -1947,14 +1948,50 @@ local function update_states(state: State): boolean
 			end
 		end
 	end
+	local live = live_panes()
+	local ok_closed, raw_closed = pcall(tern.kv.get, "closed_panes")
+	local events = if ok_closed and type(raw_closed) == "table" then raw_closed else {}
+	local seen = state.closed_panes
+	local closed: { [string]: boolean } = {}
+	if seen then
+		for pane in events do
+			if not seen[pane] then
+				closed[pane] = true
+			end
+		end
+	else
+		state.closed_panes = events
+	end
+	local completed = false
+	if state.focus == nil and next(state.closing) == nil and next(state.launching) == nil and next(closed) ~= nil then
+		local matched = false
+		completed = rewrite(state, function(list)
+			local changed = false
+			for _, item in list do
+				if type(item) == "table" and type(item.links) == "table" then
+					local pane = tonumber(item.links.tern_pane)
+					if pane and closed[tostring(pane)] then
+						matched = true
+						item.done = true
+						item.links.tern_pane = nil
+						changed = true
+					end
+				end
+			end
+			return changed
+		end)
+		if completed or not matched then
+			state.closed_panes = events
+		end
+	end
 	local panes: { number } = {}
-	for pane in live_panes() do
+	for pane in live do
 		table.insert(panes, pane)
 	end
 	table.sort(panes)
 	local sig = tern.json.encode({ states, debug, panes })
 	if sig == state.states_sig then
-		return false
+		return completed
 	end
 	state.states_sig = sig
 	state.agent_states = states
@@ -4166,6 +4203,7 @@ tern.block.define("list", {
 			agent_states = {},
 			debug_states = {},
 			states_sig = "",
+			closed_panes = nil,
 			st_timer = nil,
 			since = {},
 			nudge_seen = 0,
