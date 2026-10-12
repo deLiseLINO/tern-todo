@@ -109,11 +109,14 @@ local function import_next(path: string, queue: { Candidate }, index: number, al
 		if head.status == 0 then
 			title, id = session.read_head(head.stdout)
 		end
-		if id == candidate.id then
+		if id == candidate.id and not load_seen()[candidate.id] then
 			if title == "" and candidate.pane_title ~= "omp" then
 				title = candidate.pane_title
 			end
 			title = strip_glyph((string.gsub(title, "%s+", " ")))
+			if title == "" then
+				title = "omp session"
+			end
 			if title ~= "" then
 				local outcome = add_task(path, {
 					pane = candidate.pane,
@@ -196,4 +199,4 @@ local function arm()
 	end)
 end
 
-return { arm = arm }
+return { arm = arm, suppress = mark_seen }

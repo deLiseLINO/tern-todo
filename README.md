@@ -68,7 +68,7 @@ To toggle automatic installation from the attached window's terminal:
 tern ctl plugins run plugin.todo-proto.remote-auto-install
 ```
 
-Task opening, manual and automatic session import, session discovery, and task writes use the selected host's files. The window sends host-scoped agent states and settings actions through Tern's native connection. Closing a pane completes its linked task on that host; losing the connection does not. Settings are stored separately on each host. Todo must be version 0.4.0 or later in the window and on every attached host for this integration. Automatic installation does not upgrade existing copies.
+Task opening, manual and automatic session import, session discovery, and task writes use the selected host's files. The window sends host-scoped agent states and settings actions through Tern's native connection. Pane-close safety reads native state directly from the owning host and does not depend on the window sampler. Closing a pane completes its linked task on that host; losing the connection does not. Settings are stored separately on each host. Todo must be version 0.4.0 or later in the window and on every attached host for this integration. Automatic installation does not upgrade existing copies.
 
 ### Requirements and platform limits
 
@@ -100,7 +100,7 @@ When this project is checked out inside `slop`, it is a Git submodule. Create ta
 | j / k, Up / Down | move |
 | Space, x | toggle done; with two or more tasks selected, mark all done, or not done when all are done. Done closes an idle linked pane; not done reopens a linked omp chat. See below for the safety rules. |
 | Enter | focus the linked pane; else resume the linked omp chat in a new tab; else start the task in omp |
-| Tab, a | new task: opens its card with the last picked project preselected and puts the caret in the add field; the task is created, and appears in the list, only when Enter accepts the title; Esc or leaving the field discards it |
+| Tab, a | new task: opens its card with the last picked project preselected and puts the caret in the add field; the draft stays in memory until Enter accepts the title; Esc, closing the block, reloading, or leaving the field discards it |
 | e | edit notes (Enter inserts a newline, Tab or a click elsewhere commits, Esc discards the draft) |
 | F2, n | rename the selected task (whole title selected; Enter, Tab or a click elsewhere commits, Esc discards the draft) |
 | p | pick the project (cwd) |
@@ -153,13 +153,13 @@ Closing a linked tab or pane marks its tasks done, records the completion time, 
 
 Marking a task done, archiving it, or moving it to Backlog closes its idle linked pane with `tern close <id>`, then clears `links.tern_pane` to null. This applies to keyboard, row, card and bulk actions. Archive preserves the done status. Backlog clears it. Restoring a task or moving it back to Tasks does not reopen its chat. The omp session and cwd stay linked. Tern has no confirmation or undo for closing a pane, so the pane stays open with `Pane left open (reason)` when:
 
-- The sampled omp state is working or waiting for input.
-- The omp state is unknown, or the foreground job is neither an idle shell nor idle/exited omp. The foreground process is checked with `tern process --json`.
+- The owning host reports that omp is working or waiting for input.
+- The host cannot confirm an idle saved omp session, or the foreground job is neither an idle shell nor omp. The host checks `tern inspect --json` and `tern process --json`.
 - The pane hosts this task block, another not-done task shares it, or the process check fails.
 
 Pane closures initiated by Done, Archive or Backlog do not trigger automatic completion in other Todos blocks. Multiple blocks watching the same file preserve the requested task status.
 
-A dead pane ID is left unchanged. Bulk pane closure shows one summary, such as `Closed 2 panes, left 1 open`. The omp sample can be about 0.2 seconds old; a new job starting between the check and close is not protected by that earlier check.
+A dead pane ID is left unchanged. Bulk pane closure shows one summary, such as `Closed 2 panes, left 1 open`. A new job that starts between the host inspection and the close is not protected by that earlier check.
 
 Marking a task not done reopens its omp chat in a new tab with `omp --resume <id>` in the task cwd when it has a session but no live pane. A task without a session just becomes open; it does not start an agent. Repeated toggles are ignored while that task's close or reopen is in flight.
 
@@ -225,7 +225,7 @@ The order of the `todos` array in the JSON file is the order of the list inside 
 `Todo: add this omp session to tasks` (group `Todo`, action `plugin.todo-proto.add-omp-session`). Run it from the pane that runs omp.
 
 - The target file is the most recently opened Tasks block's file on the selected host, saved as `todo-proto.file`. Open Tasks once on that host before adding a session. Todo must be version 0.3.1 or later on both the local window and the remote host; automatic installation does not upgrade an existing package.
-- A temporary background plugin block reads the focused pane's `omp_session_file` and its first two session-file lines on that same host. It never types into the omp pane or copies local tasks to the host. The title prompt stays in your window; Enter accepts, Esc or an empty title cancels. The temporary block closes after completion or cancellation. The stored id is the one `omp --resume <id>` takes.
+- A temporary background plugin block reads the focused pane's `omp_session_file` and its first two session-file lines on that same host. The window reads its retained native surface even while the helper tab is hidden. It never types into the omp pane or copies local tasks to the host. The title prompt stays in your window; Enter accepts, Esc or an empty title cancels. The temporary block closes after completion or cancellation. The stored id is the one `omp --resume <id>` takes.
 - The task gets `links.tern_pane`, `links.cwd`, `links.omp_session`, priority `none`, no due date.
 - A session (or a pane without a session) that is already linked is not added again: the toast says `Already in tasks` and missing or stale links are filled in. Nothing is prompted in that case.
 - Errors (no omp in the pane, session not saved yet, the focused pane is not a terminal) toast and leave the file unchanged.
@@ -240,8 +240,8 @@ Bind a chord in `settings.json` (`~/Library/Application Support/Tern/settings.js
 
 While a Todos block is open, its host runs `tern inspect --json` every 10 s and adds every pane that runs omp with a saved session the file does not contain yet. The task gets the same links and title as the palette command, plus `created` and `updated` stamps, without a prompt. The open block reloads on its own. Imports go to Tasks, not Backlog.
 
-- Each session is imported at most once (kept in the plugin kv `auto-seen`, last 500 ids). Deleting an imported task does not bring it back while its pane is alive.
-- A session whose file is not saved yet, or that has no title and an `omp` pane title, is retried on the next scan.
+- Each session is imported at most once, with the last 500 ids in the plugin kv `auto-seen`. Confirmed task deletion records its linked session there too, including tasks deleted before their first automatic scan.
+- A session whose file is not saved yet is retried on the next scan. A saved session without a title appears as `omp session`. The existing Task titles from omp setting can replace that title later.
 - The target is the most recently opened Todos block's file, as for the palette command.
 - Sessions that are already open when the block first opens are imported too.
 

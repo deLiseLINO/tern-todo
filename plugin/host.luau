@@ -28,6 +28,7 @@
 
 local ui = tern.ui
 local session = require("./session")
+local json = require("./json")
 require("./session-import")
 local auto_import = require("./auto-import")
 local session_files = require("./session-files")
@@ -172,7 +173,7 @@ type State = {
 	-- nil (list keys).
 	focus: string?,
 	detail_open: boolean,
-	fresh: string?, -- a task created by Tab/a whose title has not been entered yet
+	fresh: Todo?,
 	add: Field,
 	-- Drafts of the focused detail fields, valid while focus == "title" / "notes".
 	notes: Field,
@@ -334,22 +335,7 @@ local function ordered(todos: { Todo }, tab: string, with_archived: boolean, wit
 end
 
 local function listed(state: State): { Todo }
-	local all = ordered(state.todos, state.tab, state.arch_open and state.cfg.archived, not state.cfg.done_group or state.done_open)
-	if not state.fresh then
-		return all
-	end
-	local shown: { Todo } = {}
-	for _, t in all do
-		if t.id ~= state.fresh then
-			table.insert(shown, t)
-		end
-	end
-	return shown
-end
-
--- The task created by Tab stays out of the list until Enter accepts its title.
-local function is_draft(state: State, t: Todo): boolean
-	return t.id == state.fresh
+	return ordered(state.todos, state.tab, state.arch_open and state.cfg.archived, not state.cfg.done_group or state.done_open)
 end
 
 local function str_or_nil(v: any): string?
@@ -394,7 +380,7 @@ local function parse(text: string): ({ Todo }?, string?)
 end
 
 local function ensure_cursor(state: State)
-	if state.fresh and state.cursor == state.fresh then
+	if state.fresh then
 		return
 	end
 	local shown = listed(state)
@@ -667,51 +653,6 @@ local function start_tick(state: State)
 	end)
 end
 
--- Replaces every `: null` outside a string by a marker string and back after decoding:
--- tern.json.decode drops null object members, which would delete explicit nulls the
--- block knows nothing about (unknown keys of a task, nested objects, other top-level keys).
-local NULL_MARK = "__todo_proto_null__"
-
-local function mark_nulls(text: string): string
-	local out: { string } = {}
-	local from, i, n = 1, 1, #text
-	local in_string = false
-	while i <= n do
-		local c = string.sub(text, i, i)
-		if in_string then
-			if c == "\\" then
-				i += 1
-			elseif c == '"' then
-				in_string = false
-			end
-		elseif c == '"' then
-			in_string = true
-		elseif c == ":" then
-			local s, e = string.find(text, "^%s*null", i + 1)
-			if s and not string.match(string.sub(text, e + 1, e + 1), "[%w_]") then
-				table.insert(out, string.sub(text, from, e - 4))
-				table.insert(out, '"' .. NULL_MARK .. '"')
-				from = e + 1
-				i = e
-			end
-		end
-		i += 1
-	end
-	table.insert(out, string.sub(text, from))
-	return table.concat(out)
-end
-
-local function restore_nulls(value: any): any
-	if value == NULL_MARK then
-		return tern.json.null
-	elseif type(value) == "table" then
-		for k, v in value do
-			value[k] = restore_nulls(v)
-		end
-	end
-	return value
-end
-
 local function iso_now(): string
 	return os.date("!%Y-%m-%dT%H:%M:%SZ", os.time())
 end
@@ -762,12 +703,11 @@ local function rewrite(state: State, change: ({ any }) -> boolean?): boolean
 		state.cx:toast("error", "Cannot read todo file", tostring(text))
 		return false
 	end
-	local dok, data = pcall(tern.json.decode, mark_nulls(text))
+	local dok, data = pcall(json.decode, text)
 	if not dok or type(data) ~= "table" or type(data.todos) ~= "table" then
 		state.cx:toast("error", "Todo file is not valid JSON")
 		return false
 	end
-	data = restore_nulls(data)
 	local list = tern.json.array(data.todos)
 	-- Per-task snapshot: after `change`, only a task whose content differs is stamped.
 	local snap: { [string]: any } = {}
@@ -786,9 +726,6 @@ local function rewrite(state: State, change: ({ any }) -> boolean?): boolean
 	local now = iso_now()
 	for _, item in list do
 		if type(item) == "table" and type(item.id) == "string" then
-			if item.done == true then
-				item.backlog = nil
-			end
 			local before = snap[item.id]
 			if before == nil then
 				if item.created == nil then
@@ -839,6 +776,20 @@ local function rewrite(state: State, change: ({ any }) -> boolean?): boolean
 end
 
 local function patch(state: State, id: string, change: (any) -> ())
+	if state.fresh and state.fresh.id == id then
+		change(state.fresh)
+		for _, key in { "cwd", "omp_session", "tern_pane" } do
+			if state.fresh.links[key] == tern.json.null then
+				state.fresh.links[key] = nil
+			end
+		end
+		for _, key in { "model", "thinking" } do
+			if state.fresh.agent[key] == tern.json.null then
+				state.fresh.agent[key] = nil
+			end
+		end
+		return
+	end
 	rewrite(state, function(list)
 		for _, item in list do
 			if type(item) == "table" and item.id == id then
@@ -857,7 +808,8 @@ end
 
 local function add_task(state: State, title: string)
 	local new_id = ""
-	local cwd = last_project()
+	local draft = state.fresh
+	local cwd = if draft then draft.links.cwd else last_project()
 	local written = rewrite(state, function(list)
 		local taken: { [string]: boolean } = {}
 		for _, item in list do
@@ -874,14 +826,16 @@ local function add_task(state: State, title: string)
 			id = new_id,
 			title = title,
 			notes = "",
-			priority = "none",
+			priority = if draft then draft.priority else "none",
+			agent = if draft then draft.agent else nil,
 			due = tern.json.null,
 			done = false,
 			backlog = if state.tab == "backlog" then true else nil,
-			links = if cwd then { cwd = cwd } else {},
+			links = if draft then table.clone(draft.links) else (if cwd then { cwd = cwd } else {}),
 		})
 	end)
 	if written then
+		state.fresh = nil
 		state.cursor = new_id
 		state.sel = {}
 		state.anchor = nil
@@ -899,16 +853,7 @@ local function index_of(state: State): number
 end
 
 local function selected(state: State): Todo?
-	local t = listed(state)[index_of(state)]
-	if t or not state.fresh or state.cursor ~= state.fresh then
-		return t
-	end
-	for _, draft in state.todos do
-		if is_draft(state, draft) then
-			return draft
-		end
-	end
-	return nil
+	return state.fresh or listed(state)[index_of(state)]
 end
 
 local function todo_by_id(state: State, id: string): Todo?
@@ -1147,15 +1092,22 @@ local function delete_one(state: State, t: Todo)
 	end
 	local after = neighbour(state, t.id)
 	clear_confirm(state)
+	local removed_session: string? = nil
 	local written = rewrite(state, function(list)
 		for i, item in list do
 			if type(item) == "table" and item.id == t.id then
+				if type(item.links) == "table" and type(item.links.omp_session) == "string" then
+					removed_session = item.links.omp_session
+				end
 				table.remove(list, i)
 				break
 			end
 		end
 	end)
 	if written then
+		if removed_session then
+			auto_import.suppress(removed_session)
+		end
 		state.cursor = after
 	end
 end
@@ -1182,16 +1134,22 @@ local function delete_press(state: State)
 		end
 		local after = survivor(state, set)
 		clear_confirm(state)
-		-- Only the records go; panes and omp sessions are never touched.
+		local removed_sessions: { string } = {}
 		local written = rewrite(state, function(list)
 			for i = #list, 1, -1 do
 				local item = list[i]
 				if type(item) == "table" and set[item.id] then
+					if type(item.links) == "table" and type(item.links.omp_session) == "string" then
+						table.insert(removed_sessions, item.links.omp_session)
+					end
 					table.remove(list, i)
 				end
 			end
 		end)
 		if written then
+			for _, session_id in removed_sessions do
+				auto_import.suppress(session_id)
+			end
 			state.sel = {}
 			state.anchor = nil
 			state.cursor = after or state.cursor
@@ -1993,6 +1951,7 @@ local function update_states(state: State): boolean
 					if pane and closed[tostring(pane)] then
 						matched = true
 						item.done = true
+						item.backlog = nil
 						item.links.tern_pane = nil
 						changed = true
 					end
@@ -2155,27 +2114,18 @@ local function is_omp(proc: any): boolean
 	return exe_name(argv[1]) == "omp" or exe_name(proc.name) == "omp" or exe_name(argv[2]) == "omp"
 end
 
--- Why the pane must stay open, or nil when closing it is safe. `stdout` is `tern process
--- --json PANE`: the pane may close when its foreground job is the shell (idle), or omp whose
--- sampled state is idle/exited; never while omp works or waits for the user, nor with any other
--- foreground job (tern has no confirm and no undo for a closed pane).
-local function keep_reason(state: State, pane: number, stdout: string): string?
-	local key = tostring(pane)
-	local word = state.debug_states[key] or state.agent_states[key]
-	if word == "working" or word == "running" then
-		return "agent is working"
-	elseif word == "waiting_input" or word == "needs" then
-		return "needs you"
-	end
+local function keep_reason(stdout: string, pane: { working: boolean?, omp_session_file: string? }?): string?
 	local ok, data = pcall(tern.json.decode, stdout)
-	if not ok or type(data) ~= "table" then
+	if not ok or type(data) ~= "table" or type(pane) ~= "table" then
 		return "cannot inspect it"
 	end
 	local job = if type(data.foreground) == "table" then data.foreground else data.child
 	if is_shell(job) then
 		return nil
 	elseif is_omp(job) then
-		if word == "idle" or word == "review" or word == "exited" or word == "stopped" then
+		if pane.working == true then
+			return "agent is working or needs you"
+		elseif pane.working == false and type(pane.omp_session_file) == "string" then
 			return nil
 		end
 		return "agent state unknown"
@@ -2351,13 +2301,34 @@ close_task_panes = function(state: State, set: { [string]: boolean }, commit: ({
 			probed()
 		else
 			local ok = pcall(tern.process.run, { TERN, "process", "--json", tostring(g.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
-				local why_not = if result.status ~= 0 then "cannot inspect it" else keep_reason(state, g.pane, result.stdout)
-				if why_not then
-					leave(why_not)
-				else
-					table.insert(candidates, g)
+				if result.status ~= 0 then
+					leave("cannot inspect it")
+					probed()
+					return
 				end
-				probed()
+				local inspected = pcall(tern.process.run, { TERN, "inspect", "--json" }, { timeout_ms = 5000 }, function(snapshot: ProcessResult, _)
+					local decoded, catalog = pcall(tern.json.decode, snapshot.stdout)
+					local pane = nil
+					if snapshot.status == 0 and decoded and type(catalog) == "table" and type(catalog.panes) == "table" then
+						for _, item in catalog.panes do
+							if type(item) == "table" and item.pane == g.pane then
+								pane = item
+								break
+							end
+						end
+					end
+					local why_not = keep_reason(result.stdout, pane)
+					if why_not then
+						leave(why_not)
+					else
+						table.insert(candidates, g)
+					end
+					probed()
+				end)
+				if not inspected then
+					leave("cannot run tern")
+					probed()
+				end
 			end)
 			if not ok then
 				leave("cannot run tern")
@@ -2412,6 +2383,7 @@ local function set_done(state: State, ids: { string }, to: boolean)
 			for _, item in list do
 				if type(item) == "table" and type(item.id) == "string" and set[item.id] then
 					item.done = true
+					item.backlog = nil
 					local pane = closed[item.id]
 					if pane and type(item.links) == "table" and tonumber(item.links.tern_pane) == pane then
 						item.links.tern_pane = nil
@@ -2985,22 +2957,8 @@ local function save_field(state: State, f: Field, name: string, mode: string)
 	end)
 end
 
--- Removes a just-created task that Enter never accepted.
 local function drop_fresh(state: State)
-	local id = state.fresh
 	state.fresh = nil
-	if not id then
-		return
-	end
-	rewrite(state, function(list)
-		for i, item in list do
-			if type(item) == "table" and item.id == id then
-				table.remove(list, i)
-				return true
-			end
-		end
-		return false
-	end)
 	ensure_cursor(state)
 end
 
@@ -3049,23 +3007,24 @@ local function set_focus(state: State, field: string?)
 	state.cx:frame({ { "focus", id } })
 end
 
--- Tab / a: creates an empty task with the last used project, opens its card and puts the
--- caret in the add field, whose text becomes the task title while it is typed.
 local function new_task(state: State)
 	set_focus(state, nil)
 	reset_field(state.add, "")
-	add_task(state, "")
-	state.fresh = state.cursor
+	state.fresh = {
+		id = "", title = "", notes = "", priority = "none", done = false,
+		archived = false, backlog = state.tab == "backlog",
+		links = { cwd = last_project() }, agent = {},
+	}
+	state.detail_open = true
+	state.sel = {}
+	state.anchor = nil
+	clear_confirm(state)
 	set_focus(state, "add")
 end
 
 local function sync_fresh_title(state: State)
-	local id = state.fresh
-	local title = trim(state.add.text)
-	if id and title ~= "" then
-		patch(state, id, function(item)
-			item.title = title
-		end)
+	if state.fresh then
+		state.fresh.title = trim(state.add.text)
 	end
 end
 
@@ -3468,12 +3427,7 @@ local function field_key(state: State, key: Key): boolean
 		elseif what == "submit" then
 			local title = trim(state.add.text)
 			if title ~= "" then
-				if state.fresh then
-					sync_fresh_title(state)
-				else
-					add_task(state, title)
-				end
-				state.fresh = nil
+				add_task(state, title)
 				reset_field(state.add, "")
 				set_focus(state, nil)
 			end
@@ -3491,6 +3445,7 @@ local function field_key(state: State, key: Key): boolean
 	if what == nil then
 		return false
 	elseif key.name == "escape" then
+		clear_confirm(state)
 		local name = state.focus :: string
 		save_field(state, f, name, "cancel")
 		f.task = nil
@@ -3540,7 +3495,7 @@ local function open_count(state: State): number
 	local want = state.tab == "backlog"
 	local open = 0
 	for _, t in state.todos do
-		if not t.done and not t.archived and in_backlog(t) == want and not is_draft(state, t) then
+		if not t.done and not t.archived and in_backlog(t) == want then
 			open += 1
 		end
 	end
@@ -3551,7 +3506,7 @@ local function tab_count(state: State): number
 	local want = state.tab == "backlog"
 	local n = 0
 	for _, t in state.todos do
-		if not t.archived and in_backlog(t) == want and not is_draft(state, t) then
+		if not t.archived and in_backlog(t) == want then
 			n += 1
 		end
 	end
@@ -3561,7 +3516,7 @@ end
 local function backlog_count(state: State): number
 	local n = 0
 	for _, t in state.todos do
-		if in_backlog(t) and not is_draft(state, t) then
+		if in_backlog(t) then
 			n += 1
 		end
 	end
@@ -3785,9 +3740,7 @@ local function left_view(state: State): Node
 	end
 	local rows: { Node } = {}
 	for _, t in ordered(state.todos, state.tab, false, not state.cfg.done_group) do
-		if not is_draft(state, t) then
-			table.insert(rows, row_view(state, t, live, lifted, pos))
-		end
+		table.insert(rows, row_view(state, t, live, lifted, pos))
 	end
 	local done_n = done_count(state)
 	if state.cfg.done_group and done_n > 0 then
@@ -4010,7 +3963,7 @@ local function detail_view(state: State, t: Todo): Node
 			pill_box(state, "chat", "chat", chat_title(state, t), nil, nil),
 		}),
 	})
-	local buttons = el("div", "buttons", "buttons", nil, {
+	local buttons = el("div", "buttons", "buttons", nil, if state.fresh then {} else {
 		el("button", "pill", "open", { text = primary_label(t), actions = { click = "primary" } }),
 		el("button", "pill", "done", {
 			text = if t.done then "Mark as not done" else "Mark as done",
@@ -4272,7 +4225,7 @@ tern.block.define("list", {
 			tick = nil,
 		}
 		running[cx.pane] = state
-		if state.path and string.sub(state.path, 1, 1) == "/" then
+		if not saved and state.path and string.sub(state.path, 1, 1) == "/" then
 			pcall(tern.kv.set, "todo-proto.file", state.path)
 		end
 		state.nudge_seen = nudge_n(state) or 0
@@ -4608,7 +4561,7 @@ tern.block.define("list", {
 			end
 		elseif (act == "rarch" or act == "rdel") and type(value) == "string" then
 			-- A button on the row itself: it acts on that task alone, whatever is selected.
-			if repeated(state, act .. "=" .. value) then
+			if act == "rarch" and repeated(state, act .. "=" .. value) then
 				return
 			end
 			local target: Todo? = nil
