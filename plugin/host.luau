@@ -1450,6 +1450,37 @@ local function basename(p: string): string
 	return string.match(p, "([^/]+)/*$") or p
 end
 
+local project_names: { [string]: string } = {}
+local project_asked: { [string]: boolean } = {}
+
+-- The name of the project in `cwd`: the repository name plus " (wt)" inside a linked
+-- worktree. Git answers once per path; the directory name shows until then.
+local function project_label(state: State, cwd: string): string
+	local known = project_names[cwd]
+	if known then
+		return known
+	end
+	if not project_asked[cwd] then
+		project_asked[cwd] = true
+		pcall(tern.process.run, {
+			"/usr/bin/git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+		}, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+			local git_dir, common = string.match(result.stdout, "^([^\n]+)\n([^\n]+)")
+			if result.status ~= 0 or not git_dir or not common then
+				project_names[cwd] = basename(cwd)
+			elseif git_dir == common then
+				project_names[cwd] = basename(cwd)
+			else
+				project_names[cwd] = basename((string.gsub(common, "/%.git/*$", ""))) .. " (wt)"
+			end
+			if alive(state) then
+				state.cx:render()
+			end
+		end)
+	end
+	return basename(cwd)
+end
+
 local function abbreviate(p: string): string
 	local home = home_dir()
 	if p == home then
@@ -3965,8 +3996,10 @@ local function detail_view(state: State, t: Todo): Node
 		el("div", "agent-row", "pills", nil, {
 			pill_box(state, "model", "model", t.agent.model or "Default model", nil, nil),
 			level_pill(t.agent.thinking),
-			pill_box(state, "project", "cwd", if t.links.cwd then basename(t.links.cwd) else "No project", nil, "folder"),
-			click_pill("worktree", if state.cfg.new_chat_worktree then "Worktree" else "Local", nil, "none", "worktree"),
+			el("div", "agent-group", "project", nil, {
+				pill_box(state, "project", "cwd", if t.links.cwd then project_label(state, t.links.cwd) else "No project", nil, "folder"),
+				click_pill("worktree", if state.cfg.new_chat_worktree then "Worktree" else "Local", nil, "none", "worktree"),
+			}),
 			pill_box(state, "chat", "chat", chat_title(state, t), nil, nil),
 		}),
 	})
