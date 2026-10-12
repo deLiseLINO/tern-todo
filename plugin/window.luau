@@ -164,6 +164,10 @@ local function restore_nulls(value: any): any
 	return value
 end
 
+local function iso_now(): string
+	return os.date("!%Y-%m-%dT%H:%M:%SZ", os.time())
+end
+
 local function is_text(v: any): boolean
 	return type(v) == "string" and v ~= ""
 end
@@ -257,6 +261,9 @@ local function add_task(path: string, target: Target): (string?, string, string?
 				links.cwd = target.cwd
 				touched = true
 			end
+			if touched then
+				found.updated = iso_now()
+			end
 			outcome = if touched then "updated" else "exists"
 			return touched
 		end
@@ -282,6 +289,8 @@ local function add_task(path: string, target: Target): (string?, string, string?
 				cwd = if target.cwd ~= "" then target.cwd else tern.json.null,
 				omp_session = target.session,
 			},
+			created = iso_now(),
+			updated = iso_now(),
 		})
 		outcome = "added"
 		return true
@@ -441,4 +450,163 @@ tern.command({
 	group = "Todo",
 	icon = "check",
 	run = add_omp_session,
+})
+
+-- Auto-import: while a Todos block is open, every AUTO_MS this half lists the panes running
+-- omp and adds each saved session the file does not know yet. A session is imported at most
+-- once (kv "auto-seen"), so deleting an imported task does not bring it back while its pane lives.
+-- A session without a saved file or a title is retried on the next scan.
+local AUTO_MS = 10000
+local SEEN_KEY = "auto-seen"
+local SEEN_MAX = 500
+
+local auto_armed = false
+local auto_busy = false
+
+local function load_seen(): ({ [string]: boolean }, { string })
+	local set: { [string]: boolean } = {}
+	local order: { string } = {}
+	local ok, saved_seen = pcall(tern.kv.get, SEEN_KEY)
+	if ok and type(saved_seen) == "table" then
+		for _, id in saved_seen :: { any } do
+			if type(id) == "string" and not set[id] then
+				set[id] = true
+				table.insert(order, id)
+			end
+		end
+	end
+	return set, order
+end
+
+local function mark_seen(id: string)
+	local set, order = load_seen()
+	if set[id] then
+		return
+	end
+	table.insert(order, id)
+	while #order > SEEN_MAX do
+		table.remove(order, 1)
+	end
+	pcall(tern.kv.set, SEEN_KEY, order)
+end
+
+type Candidate = { pane: number, cwd: string, file: string, id: string, pane_title: string }
+
+local function import_next(path: string, queue: { Candidate }, index: number)
+	local c = queue[index]
+	if not c then
+		auto_busy = false
+		return
+	end
+	tern.process.run({ "/usr/bin/head", "-n", "2", "--", c.file }, { timeout_ms = 5000 }, function(head, _)
+		local title, id = "", nil :: string?
+		if head.status == 0 then
+			title, id = session.read_head(head.stdout)
+		end
+		if id == c.id then
+			if title == "" and c.pane_title ~= "omp" then
+				title = c.pane_title
+			end
+			title = strip_glyph((string.gsub(title, "%s+", " ")))
+			if title ~= "" then
+				local outcome = add_task(path, { pane = c.pane, cwd = c.cwd, session = c.id, title = title })
+				if outcome then
+					mark_seen(c.id)
+					if outcome ~= "exists" then
+						local okv, old = pcall(tern.kv.get, NUDGE_KEY)
+						local n = if okv and type(old) == "table" and type(old.n) == "number" then old.n + 1 else 1
+						pcall(tern.kv.set, NUDGE_KEY, { path = path, n = n })
+					end
+				end
+			end
+		end
+		import_next(path, queue, index + 1)
+	end)
+end
+
+local function auto_scan()
+	if auto_busy then
+		return
+	end
+	local wok, watch = pcall(tern.kv.get, "watch")
+	if not wok or type(watch) ~= "number" or os.time() - watch > WATCH_FRESH_S then
+		return
+	end
+	local fok, path = pcall(tern.kv.get, FILE_KEY)
+	if not fok or type(path) ~= "string" or path == "" then
+		return
+	end
+	auto_busy = true
+	local started = pcall(tern.process.run, { TERN, "inspect", "--json" }, { timeout_ms = 8000 }, function(result, _)
+		local iok, doc = pcall(tern.json.decode, result.stdout)
+		local queue: { Candidate } = {}
+		if result.status == 0 and iok and type(doc) == "table" and type(doc.panes) == "table" then
+			local seen = load_seen()
+			local queued: { [string]: boolean } = {}
+			for _, p in doc.panes do
+				if type(p) == "table" and type(p.pane) == "number" and is_text(p.omp_session_file) then
+					local id = string.match(p.omp_session_file, "_([%w%-]+)%.jsonl$")
+					if id and not seen[id] and not queued[id] then
+						queued[id] = true
+						table.insert(queue, {
+							pane = p.pane,
+							cwd = if type(p.cwd) == "string" then p.cwd else "",
+							file = p.omp_session_file,
+							id = id,
+							pane_title = if type(p.title) == "string" then strip_glyph(p.title) else "",
+						})
+					end
+				end
+			end
+		end
+		import_next(path, queue, 1)
+	end)
+	if not started then
+		auto_busy = false
+	end
+end
+
+local function auto_arm()
+	if auto_armed then
+		return
+	end
+	auto_armed = true
+	tern.timer(AUTO_MS, function(_cx)
+		auto_armed = false
+		pcall(auto_scan)
+		auto_arm()
+	end)
+end
+
+tern.on("window_start", function(_cx)
+	auto_arm()
+end)
+
+tern.timer(500, function(_cx)
+	auto_arm()
+end)
+
+-- Palette command: open the settings sheet of the focused Todos block. The block runs in the
+-- host half, so the request goes through tern.kv "todo-proto.settings_req" = { pane, n }; the
+-- block of that pane opens its sheet on its next state tick (about 2 seconds).
+local SETTINGS_REQ_KEY = "todo-proto.settings_req"
+
+local function open_settings(cx: WindowCx)
+	local pane = cx.session:focused()
+	local info = if pane then cx.session:pane(pane) else nil
+	if not pane or not info or type(info.block) ~= "string" or not string.find(info.block, "todo-proto.list", 1, true) then
+		cx:toast("error", "Focus a Todos block first")
+		return
+	end
+	local okv, old = pcall(tern.kv.get, SETTINGS_REQ_KEY)
+	local n = if okv and type(old) == "table" and type(old.n) == "number" then old.n + 1 else 1
+	pcall(tern.kv.set, SETTINGS_REQ_KEY, { pane = pane, n = n })
+end
+
+tern.command({
+	id = "settings",
+	title = "Todo: settings",
+	group = "Todo",
+	icon = "check",
+	run = open_settings,
 })

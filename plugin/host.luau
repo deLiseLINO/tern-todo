@@ -19,6 +19,15 @@
 -- Keys (field focused): typing edits the field, Enter adds the task (add row), saves the
 -- title or inserts a newline (notes), Tab commits; Esc discards title/notes drafts.
 --
+-- Settings: the bottom-right gear, the `,` key (no field focused) and the palette command
+-- "Todo: settings" open a centred sheet of switches (see SETTINGS), kept in tern.kv "settings"
+-- and shared by every block and window. Up/Down, Space/Enter toggle, Esc or `,` closes.
+--
+-- Times: the block stamps the tasks it changes with ISO UTC `created` (new tasks), `updated` (any
+-- change of that task; a reorder is none) and `completed` (while done). Each row shows the age
+-- of `completed` (done), the later of `updated` and the linked omp session file's mtime, or
+-- `updated`/`created`, as now/Nm/Nh/Nd/Nw/Nmo/Ny; tasks without a valid stamp show nothing.
+--
 -- Fields are natively edited: the block opts into `features = {"edit", "undo"}`, so Tern
 -- keeps the selection (shift-arrows, drag, double/triple click, cmd+a) and sends edits as
 -- `edit` events and cmd+z as `undo`. The block's `Field` model applies those, plus the
@@ -95,6 +104,23 @@ local SEARCH: { [string]: string } = {
 	chat = "Search chats",
 }
 
+-- Settings (tern.kv "settings", shared by every Todos block and window; absent keys use
+-- their default). Each one gates something real below.
+local SETTINGS_KEY = "settings"
+local SETTINGS_REQ_KEY = "todo-proto.settings_req"
+local SETTINGS: { { id: string, label: string, hint: string, default: boolean } } = {
+	{ id = "time", label = "Show time on rows", hint = "How long ago a task was last touched, at the right of the row.", default = true },
+	{ id = "row_actions", label = "Show row action icons", hint = "Done, move to backlog, archive and delete buttons on hovered rows.", default = true },
+	{ id = "close_on_done", label = "Close pane when a task is done", hint = "Done closes the linked pane unless the agent is busy.", default = true },
+	{ id = "reopen_on_undone", label = "Reopen chat when a task is not done", hint = "Not done resumes the task's omp chat in a new tab.", default = true },
+	{ id = "dblclick", label = "Double-click opens pane", hint = "Double-click does what Enter does: focus, resume or start.", default = true },
+	{ id = "archived", label = "Show archived section", hint = "The Archived list below the tasks.", default = true },
+	{ id = "badges", label = "Show badges on rows", hint = "Priority, pane and omp chips under the title.", default = true },
+	{ id = "status_line", label = "Show agent status on rows", hint = "Working, Needs you, Ready for you or Stopped under the title.", default = true },
+	{ id = "hints", label = "Show key hints", hint = "The line of keyboard shortcuts at the bottom of the block.", default = true },
+	{ id = "done_group", label = "Done tasks as a separate group", hint = "Collapse completed tasks into their own Done section.", default = false },
+}
+
 
 type Links = { tern_pane: number?, cwd: string?, omp_session: string? }
 type Agent = { model: string?, thinking: string? }
@@ -106,8 +132,13 @@ type Todo = {
 	due: string?,
 	done: boolean,
 	archived: boolean,
+	backlog: boolean,
 	links: Links,
 	agent: Agent,
+	-- ISO UTC stamps the block maintains (absent on tasks it has not touched yet).
+	created: string?,
+	updated: string?,
+	completed: string?,
 }
 
 type Model = { selector: string, id: string, provider: string, reasoning: boolean, efforts: { string }, context: string }
@@ -169,6 +200,9 @@ type State = {
 	-- Archived section expanded; id of the task whose Delete awaits its second press (view
 	-- state only, never saved to the file).
 	arch_open: boolean,
+	-- Whether the optional Done section is expanded, kept only in this block.
+	done_open: boolean,
+	tab: string,
 	confirm: string?,
 	confirm_timer: TimerHandle?,
 	-- The task picked up by its grip, waiting to be dropped on a row (view state only).
@@ -184,10 +218,27 @@ type State = {
 	anchor: string?,
 	confirm_bulk: boolean,
 	closing: { [string]: boolean },
+	-- Settings (see SETTINGS), the sheet that edits them, the last settings-sheet click, the
+	-- palette request counter already handled, and the omp session files' last activity
+	-- (mtime, seconds) with their paths and the last lookup try per session id.
+	cfg: { [string]: boolean },
+	settings_open: boolean,
+	settings_sel: number,
+	settings_tap: { id: string, at: number }?,
+	settings_req: number,
+	sess_mtime: { [string]: number },
+	sess_path: { [string]: string },
+	sess_tried: { [string]: number },
+	sess_busy: boolean,
+	-- The shared minute-aligned timer that refreshes the time labels.
+	tick: TimerHandle?,
 }
 
 -- A pane ID survives Restart; the state object identifies this block run.
 local running: { [number]: State } = {}
+
+-- Defined with the picker functions, which it needs.
+local open_settings: (State) -> ()
 
 local CONFIRM_MS = 4000
 
@@ -203,6 +254,10 @@ end
 local function retire(state: State)
 	if running[state.cx.pane] == state then
 		running[state.cx.pane] = nil
+	end
+	if state.tick then
+		state.tick:cancel()
+		state.tick = nil
 	end
 	if state.timer then
 		state.timer:cancel()
@@ -239,20 +294,29 @@ local function live_panes(): { [number]: boolean }
 end
 
 -- Open todos first, then done ones, file order inside each group; archived ones last, and
--- only while the Archived section is expanded.
-local function ordered(todos: { Todo }, with_archived: boolean): { Todo }
+-- only while the Archived section is expanded. The Backlog tab lists only backlog tasks, the
+-- Tasks tab everything else; an archived task is never in the backlog. `with_done` is false
+-- while done tasks sit in a collapsed Done group.
+local function in_backlog(t: Todo): boolean
+	return t.backlog and not t.archived
+end
+
+local function ordered(todos: { Todo }, tab: string, with_archived: boolean, with_done: boolean): { Todo }
+	local want = tab == "backlog"
 	local out: { Todo } = {}
 	for _, t in todos do
-		if not t.done and not t.archived then
+		if not t.done and not t.archived and in_backlog(t) == want then
 			table.insert(out, t)
 		end
 	end
-	for _, t in todos do
-		if t.done and not t.archived then
-			table.insert(out, t)
+	if with_done then
+		for _, t in todos do
+			if t.done and not t.archived and in_backlog(t) == want then
+				table.insert(out, t)
+			end
 		end
 	end
-	if with_archived then
+	if with_archived and not want then
 		for _, t in todos do
 			if t.archived then
 				table.insert(out, t)
@@ -260,6 +324,10 @@ local function ordered(todos: { Todo }, with_archived: boolean): { Todo }
 		end
 	end
 	return out
+end
+
+local function listed(state: State): { Todo }
+	return ordered(state.todos, state.tab, state.arch_open and state.cfg.archived, not state.cfg.done_group or state.done_open)
 end
 
 local function str_or_nil(v: any): string?
@@ -287,12 +355,16 @@ local function parse(text: string): ({ Todo }?, string?)
 				due = if type(item.due) == "string" then item.due else nil,
 				done = item.done == true,
 				archived = item.archived == true,
+				backlog = item.backlog == true,
 				links = {
 					tern_pane = tonumber(links.tern_pane),
 					cwd = str_or_nil(links.cwd),
 					omp_session = str_or_nil(links.omp_session),
 				},
 				agent = { model = str_or_nil(agent.model), thinking = str_or_nil(agent.thinking) },
+				created = str_or_nil(item.created),
+				updated = str_or_nil(item.updated),
+				completed = str_or_nil(item.completed),
 			})
 		end
 	end
@@ -300,7 +372,7 @@ local function parse(text: string): ({ Todo }?, string?)
 end
 
 local function ensure_cursor(state: State)
-	local shown = ordered(state.todos, state.arch_open)
+	local shown = listed(state)
 	for _, t in shown do
 		if t.id == state.cursor then
 			return
@@ -315,7 +387,7 @@ local function prune_sel(state: State)
 		return
 	end
 	local visible: { [string]: boolean } = {}
-	for _, t in ordered(state.todos, state.arch_open) do
+	for _, t in listed(state) do
 		visible[t.id] = true
 	end
 	local changed = false
@@ -352,6 +424,235 @@ local function load(state: State)
 	state.todos = todos
 	ensure_cursor(state)
 	prune_sel(state)
+end
+
+-- Time ------------------------------------------------------------------
+
+local function days_from_civil(y: number, m: number, d: number): number
+	if m <= 2 then
+		y -= 1
+	end
+	local era = y // 400
+	local yoe = y - era * 400
+	local mp = (m + 9) % 12
+	local doy = (153 * mp + 2) // 5 + d - 1
+	local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+	return era * 146097 + doe - 719468
+end
+
+-- Seconds since the epoch of an ISO-8601 stamp ("2026-10-12T09:30:00Z", fraction and
+-- +hh:mm offsets allowed; no zone means UTC), nil when it is not one.
+local function parse_iso(text: string?): number?
+	if not text then
+		return nil
+	end
+	local y, mo, d, h, mi, s, rest = string.match(text, "^(%d%d%d%d)%-(%d%d)%-(%d%d)[Tt ](%d%d):(%d%d):(%d%d)(.*)$")
+	if not y then
+		return nil
+	end
+	local Y, M, D = tonumber(y) or 0, tonumber(mo) or 0, tonumber(d) or 0
+	local H, I, S = tonumber(h) or 0, tonumber(mi) or 0, tonumber(s) or 0
+	if M < 1 or M > 12 or D < 1 or D > 31 or H > 23 or I > 59 or S > 60 then
+		return nil
+	end
+	local zone = (string.gsub(rest :: string, "^%.%d+", ""))
+	local offset = 0
+	if zone ~= "" and zone ~= "Z" and zone ~= "z" then
+		local sign, oh, om = string.match(zone, "^([%+%-])(%d%d):?(%d%d)$")
+		if not sign then
+			return nil
+		end
+		offset = ((tonumber(oh) or 0) * 3600 + (tonumber(om) or 0) * 60) * (if sign == "+" then 1 else -1)
+	end
+	return days_from_civil(Y, M, D) * 86400 + H * 3600 + I * 60 + S - offset
+end
+
+-- T3 Code / Synara row label: now, Nm, Nh, Nd, Nw, Nmo, Ny (each step floors).
+local function format_age(now: number, ts: number): string
+	local secs = now - ts
+	if secs < 60 then
+		return "now"
+	end
+	local mins = secs // 60
+	if mins < 60 then
+		return mins .. "m"
+	end
+	local hours = mins // 60
+	if hours < 24 then
+		return hours .. "h"
+	end
+	local days = hours // 24
+	if days < 7 then
+		return days .. "d"
+	elseif days < 30 then
+		return (days // 7) .. "w"
+	elseif days < 365 then
+		return (days // 30) .. "mo"
+	end
+	return (days // 365) .. "y"
+end
+
+-- The moment a row's label counts from, and what it means: a done task shows `completed`; a
+-- task with an omp chat the later of `updated` and the chat file's last activity; any other
+-- `updated`, else `created`. Nothing when the task carries no valid stamp (old tasks stay
+-- unlabelled until the block first touches them).
+local function stamp_of(state: State, t: Todo): (number?, string)
+	if t.done then
+		local c = parse_iso(t.completed)
+		if c then
+			return c, "completed"
+		end
+	end
+	local base, kind = parse_iso(t.updated), "updated"
+	if not base then
+		base, kind = parse_iso(t.created), "created"
+	end
+	local sid = t.links.omp_session
+	if sid and not t.done then
+		local m = state.sess_mtime[sid]
+		if m and (not base or m > base) then
+			return m, "activity"
+		end
+	end
+	return base, kind
+end
+
+local STAMP_PREFIX: { [string]: string } = {
+	completed = "Completed",
+	updated = "Updated",
+	created = "Created",
+	activity = "Last activity",
+}
+
+-- Label, absolute local date and a sentence for the card; nil without a stamp.
+local function stamp_label(state: State, t: Todo): (string?, string?, string?)
+	local ts, kind = stamp_of(state, t)
+	if not ts then
+		return nil, nil, nil
+	end
+	local label = format_age(os.time(), ts)
+	local abs = os.date("%a %d %b %Y, %H:%M", ts)
+	local ago = if label == "now" then "just now" else label .. " ago"
+	return label, abs, STAMP_PREFIX[kind] .. " " .. ago .. " · " .. abs
+end
+
+-- Settings --------------------------------------------------------------
+
+-- One-time cutover from master's former modal store. Canonical values take precedence.
+local settings_migrated = false
+local function migrate_settings()
+	if settings_migrated then
+		return
+	end
+	local ok, old = pcall(tern.kv.get, "todo-proto.settings")
+	local cok, current = pcall(tern.kv.get, SETTINGS_KEY)
+	if not ok or not cok then
+		return
+	end
+	if type(old) == "table" then
+		local merged = if type(current) == "table" then table.clone(current) else {}
+		for key, value in old do
+			if merged[key] == nil then
+				merged[key] = value
+			end
+		end
+		if not pcall(tern.kv.set, SETTINGS_KEY, merged) then
+			return
+		end
+		if not pcall(tern.kv.set, "todo-proto.settings", nil) then
+			return
+		end
+	end
+	settings_migrated = true
+end
+
+local function read_settings(): { [string]: boolean }
+	migrate_settings()
+	local out: { [string]: boolean } = {}
+	local ok, raw = pcall(tern.kv.get, SETTINGS_KEY)
+	local src: { [string]: any } = if ok and type(raw) == "table" then raw else {}
+	for key, value in src do
+		if type(value) == "boolean" then
+			out[key] = value
+		end
+	end
+	for _, s in SETTINGS do
+		local v = src[s.id]
+		out[s.id] = if type(v) == "boolean" then v else s.default
+	end
+	return out
+end
+
+-- What a settings change implies for the view state.
+local function apply_settings(state: State)
+	if not state.cfg.done_group then
+		state.done_open = false
+	end
+	if not state.cfg.archived then
+		state.arch_open = false
+	end
+	ensure_cursor(state)
+	prune_sel(state)
+end
+
+-- Re-reads the kv (another window or block may have changed it); true when a value differs.
+local function refresh_cfg(state: State): boolean
+	local fresh = read_settings()
+	local changed = false
+	for id, v in fresh do
+		if state.cfg[id] ~= v then
+			changed = true
+		end
+	end
+	if changed then
+		state.cfg = fresh
+		apply_settings(state)
+	end
+	return changed
+end
+
+local function toggle_setting(state: State, id: string)
+	refresh_cfg(state)
+	local nextcfg = table.clone(state.cfg)
+	nextcfg[id] = not nextcfg[id]
+	local ok, err = pcall(tern.kv.set, SETTINGS_KEY, nextcfg)
+	if not ok then
+		state.cx:toast("error", "Cannot save settings", tostring(err))
+		return
+	end
+	state.cfg = nextcfg
+	apply_settings(state)
+end
+
+-- The palette command (window.luau) writes { pane, n } to tern.kv "todo-proto.settings_req";
+-- the block of that pane opens its sheet on its next state tick.
+local function settings_requested(state: State): boolean
+	local ok, v = pcall(tern.kv.get, SETTINGS_REQ_KEY)
+	if ok and type(v) == "table" and type(v.n) == "number" and v.n ~= state.settings_req then
+		state.settings_req = v.n
+		if v.pane == state.cx.pane then
+			open_settings(state)
+			return true
+		end
+	end
+	return false
+end
+
+-- One timer for the whole list, first fired on the next minute boundary, then every minute.
+local function start_tick(state: State)
+	if state.tick or not state.path then
+		return
+	end
+	state.tick = tern.timer((60 - os.time() % 60) * 1000 + 200, function()
+		state.tick = nil
+		if not running[state.cx.pane] or running[state.cx.pane] ~= state then
+			return
+		end
+		if state.cfg.time then
+			state.cx:render()
+		end
+		start_tick(state)
+	end)
 end
 
 -- Replaces every `: null` outside a string by a marker string and back after decoding:
@@ -399,6 +700,41 @@ local function restore_nulls(value: any): any
 	return value
 end
 
+local function iso_now(): string
+	return os.date("!%Y-%m-%dT%H:%M:%SZ", os.time())
+end
+
+local function deep_copy(v: any): any
+	if type(v) ~= "table" or v == tern.json.null then
+		return v
+	end
+	local out: { [any]: any } = {}
+	for k, x in v do
+		out[k] = deep_copy(x)
+	end
+	return out
+end
+
+local function deep_equal(a: any, b: any): boolean
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" then
+		return false
+	end
+	for k, x in a do
+		if not deep_equal(x, b[k]) then
+			return false
+		end
+	end
+	for k in b do
+		if a[k] == nil then
+			return false
+		end
+	end
+	return true
+end
+
 -- Re-reads the file, lets `change` edit its `todos` array, and writes it back.
 -- Reading first keeps edits made elsewhere; known keys that are absent are filled in
 -- as explicit nulls (`due` is kept as it is, null when unset;
@@ -421,9 +757,40 @@ local function rewrite(state: State, change: ({ any }) -> boolean?): boolean
 	end
 	data = restore_nulls(data)
 	local list = tern.json.array(data.todos)
+	-- Per-task snapshot: after `change`, only a task whose content differs is stamped.
+	local snap: { [string]: any } = {}
+	for _, item in list do
+		if type(item) == "table" and type(item.id) == "string" then
+			snap[item.id] = deep_copy(item)
+		end
+	end
 	if change(list) == false then
 		load(state)
 		return false
+	end
+	-- `updated` moves on every task the change touched (a reorder touches none); a task that
+	-- turned done gets `completed`, one that turned open loses it; new tasks get `created`.
+	-- Tasks the change left alone, and keys the block does not know, are not rewritten.
+	local now = iso_now()
+	for _, item in list do
+		if type(item) == "table" and type(item.id) == "string" then
+			local before = snap[item.id]
+			if before == nil then
+				if item.created == nil then
+					item.created = now
+				end
+				if item.updated == nil then
+					item.updated = now
+				end
+			elseif not deep_equal(before, item) then
+				item.updated = now
+				if item.done == true and before.done ~= true then
+					item.completed = now
+				elseif item.done ~= true and before.done == true then
+					item.completed = nil
+				end
+			end
+		end
 	end
 	for _, item in list do
 		if type(item) == "table" then
@@ -487,6 +854,7 @@ local function add_task(state: State, title: string)
 			priority = "none",
 			due = tern.json.null,
 			done = false,
+			backlog = if state.tab == "backlog" then true else nil,
 			links = {},
 		})
 	end)
@@ -499,7 +867,7 @@ local function add_task(state: State, title: string)
 end
 
 local function index_of(state: State): number
-	for i, t in ordered(state.todos, state.arch_open) do
+	for i, t in listed(state) do
 		if t.id == state.cursor then
 			return i
 		end
@@ -508,7 +876,7 @@ local function index_of(state: State): number
 end
 
 local function selected(state: State): Todo?
-	return ordered(state.todos, state.arch_open)[index_of(state)]
+	return listed(state)[index_of(state)]
 end
 
 local function todo_by_id(state: State, id: string): Todo?
@@ -531,7 +899,7 @@ local function multi_ids(state: State): { string }
 	if next(state.sel) == nil then
 		return out
 	end
-	for _, t in ordered(state.todos, state.arch_open) do
+	for _, t in listed(state) do
 		if state.sel[t.id] then
 			table.insert(out, t.id)
 		end
@@ -544,7 +912,7 @@ end
 
 -- Selects the visible rows from the anchor (else the cursor) to `to`, ends included.
 local function select_range(state: State, to: string)
-	local shown = ordered(state.todos, state.arch_open)
+	local shown = listed(state)
 	if not state.anchor then
 		state.anchor = state.cursor
 	end
@@ -593,7 +961,7 @@ end
 
 -- Shift+Up / Shift+Down: moves the cursor and selects from the anchor to it.
 local function extend(state: State, delta: number)
-	local shown = ordered(state.todos, state.arch_open)
+	local shown = listed(state)
 	local t = shown[math.clamp(index_of(state) + delta, 1, math.max(1, #shown))]
 	if not t then
 		return
@@ -609,7 +977,7 @@ end
 
 local function select_all(state: State)
 	local sel: { [string]: boolean } = {}
-	for _, t in ordered(state.todos, state.arch_open) do
+	for _, t in listed(state) do
 		sel[t.id] = true
 	end
 	state.lift = nil
@@ -621,7 +989,7 @@ end
 -- The row to put the cursor on once the rows in `gone` leave: the next one not in it, else the
 -- previous one.
 local function survivor(state: State, gone: { [string]: boolean }): string?
-	local shown = ordered(state.todos, state.arch_open)
+	local shown = listed(state)
 	local last = 0
 	for i, t in shown do
 		if gone[t.id] then
@@ -642,7 +1010,7 @@ local function survivor(state: State, gone: { [string]: boolean }): string?
 end
 
 local function move(state: State, to: number)
-	local shown = ordered(state.todos, state.arch_open)
+	local shown = listed(state)
 	local t = shown[math.clamp(to, 1, math.max(1, #shown))]
 	if t then
 		if state.cursor ~= t.id then
@@ -657,7 +1025,7 @@ end
 -- The task to select once `id` leaves the list or its group: the next one, else the
 -- previous one, preferring its own group (open/done vs archived).
 local function neighbour(state: State, id: string): string?
-	local shown = ordered(state.todos, state.arch_open)
+	local shown = listed(state)
 	local at = 0
 	for i, t in shown do
 		if t.id == id then
@@ -697,6 +1065,9 @@ local function bulk_archive(state: State, ids: { string })
 		for _, item in list do
 			if type(item) == "table" and set[item.id] then
 				item.archived = if target then true else nil
+				if target then
+					item.backlog = nil
+				end
 			end
 		end
 	end)
@@ -723,12 +1094,44 @@ local function archive_toggle(state: State, t: Todo)
 		for _, item in list do
 			if type(item) == "table" and item.id == t.id then
 				item.archived = if target then true else nil
+				if target then
+					item.backlog = nil
+				end
 			end
 		end
 	end)
 	if written then
 		state.cursor = after
 		state.cx:toast("info", if target then "Archived" else "Restored")
+	end
+end
+
+-- First press arms the confirmation on the task's own button, the second removes the record.
+local function delete_one(state: State, t: Todo)
+	if state.confirm ~= t.id then
+		clear_confirm(state)
+		state.confirm = t.id
+		state.confirm_timer = tern.timer(CONFIRM_MS, function()
+			state.confirm_timer = nil
+			if alive(state) and state.confirm == t.id then
+				state.confirm = nil
+				state.cx:render()
+			end
+		end)
+		return
+	end
+	local after = neighbour(state, t.id)
+	clear_confirm(state)
+	local written = rewrite(state, function(list)
+		for i, item in list do
+			if type(item) == "table" and item.id == t.id then
+				table.remove(list, i)
+				break
+			end
+		end
+	end)
+	if written then
+		state.cursor = after
 	end
 end
 
@@ -776,43 +1179,90 @@ local function delete_press(state: State)
 	if not t then
 		return
 	end
-	-- The confirm button lives in the detail card; arming it unseen would be a trap.
-	if not state.detail_open then
-		state.detail_open = true
-		return
-	end
-	if state.confirm ~= t.id then
-		clear_confirm(state)
-		state.confirm = t.id
-		state.confirm_timer = tern.timer(CONFIRM_MS, function()
-			state.confirm_timer = nil
-			if alive(state) and state.confirm == t.id then
-				state.confirm = nil
-				state.cx:render()
-			end
-		end)
-		return
-	end
-	local after = neighbour(state, t.id)
-	clear_confirm(state)
-	local written = rewrite(state, function(list)
-		for i, item in list do
-			if type(item) == "table" and item.id == t.id then
-				table.remove(list, i)
-				break
-			end
-		end
-	end)
-	if written then
-		state.cursor = after
-	end
+	delete_one(state, t)
 end
 
 local function toggle_archived(state: State)
+	if not state.cfg.archived then
+		return
+	end
 	state.arch_open = not state.arch_open
 	clear_confirm(state)
 	ensure_cursor(state)
 	prune_sel(state)
+end
+
+local function toggle_done_open(state: State)
+	state.done_open = not state.done_open
+	clear_confirm(state)
+	ensure_cursor(state)
+	prune_sel(state)
+end
+
+
+local function switch_tab(state: State, tab: string)
+	if state.tab == tab then
+		return
+	end
+	state.tab = tab
+	state.lift = nil
+	clear_sel(state)
+	state.anchor = nil
+	ensure_cursor(state)
+end
+
+-- Moves tasks between the Tasks list and the Backlog; archived tasks stay where they are.
+local function backlog_ids(state: State, ids: { string })
+	local set: { [string]: boolean } = {}
+	local all_backlog = true
+	for _, id in ids do
+		local t = todo_by_id(state, id)
+		if t and not t.archived then
+			set[id] = true
+			if not t.backlog then
+				all_backlog = false
+			end
+		end
+	end
+	if next(set) == nil then
+		return
+	end
+	local target = not all_backlog
+	local after = survivor(state, set)
+	clear_confirm(state)
+	local written = rewrite(state, function(list)
+		for _, item in list do
+			if type(item) == "table" and set[item.id] then
+				item.backlog = if target then true else nil
+			end
+		end
+	end)
+	if written then
+		state.sel = {}
+		state.anchor = nil
+		state.cursor = after or state.cursor
+		ensure_cursor(state)
+		state.cx:toast("info", if target then "Moved to backlog" else "Back to tasks")
+	end
+end
+
+local function backlog_toggle(state: State, t: Todo)
+	local ids = multi_ids(state)
+	if #ids >= 2 then
+		backlog_ids(state, ids)
+	else
+		backlog_ids(state, { t.id })
+	end
+end
+
+local function bulk_all_backlog(state: State, ids: { string }): boolean
+	for _, id in ids do
+		local t = todo_by_id(state, id)
+		if t and not t.archived and not t.backlog then
+			return false
+		end
+	end
+	return true
 end
 
 -- Reorder -------------------------------------------------------------------
@@ -886,7 +1336,7 @@ end
 
 -- The neighbour `delta` places away in the same group, if there is one (a group's edge stops).
 local function neighbour_in_group(state: State, t: Todo, delta: number): Todo?
-	local other = ordered(state.todos, state.arch_open)[index_of(state) + delta]
+	local other = listed(state)[index_of(state) + delta]
 	if other and group_of(other) == group_of(t) then
 		return other
 	end
@@ -1600,6 +2050,7 @@ local function set_done(state: State, ids: { string }, to: boolean)
 		return
 	end
 	local bulk = #ids > 1
+	refresh_cfg(state)
 
 	if not to then
 		local written = rewrite(state, function(list)
@@ -1613,7 +2064,7 @@ local function set_done(state: State, ids: { string }, to: boolean)
 			local opened = 0
 			for _, id in want do
 				local t = todo_by_id(state, id)
-				if t and t.links.omp_session and not live_pane_of(t) then
+				if t and state.cfg.reopen_on_undone and t.links.omp_session and not live_pane_of(t) then
 					opened += 1
 					launch(state, t, { omp_bin(), "--resume", t.links.omp_session }, false)
 				end
@@ -1657,6 +2108,10 @@ local function set_done(state: State, ids: { string }, to: boolean)
 				table.insert(groups, { pane = pane, ids = { id } })
 			end
 		end
+	end
+	-- Setting off: the task only changes status; its pane and link stay.
+	if not state.cfg.close_on_done then
+		groups = {}
 	end
 	if #groups == 0 then
 		if write_done({}) and bulk then
@@ -1813,10 +2268,95 @@ local function bulk_action(state: State, which: string?)
 	end
 	if which == "archive" then
 		bulk_archive(state, ids)
+	elseif which == "backlog" then
+		backlog_ids(state, ids)
 	elseif which == "done" then
 		bulk_done(state, ids)
 	elseif which == "delete" then
 		delete_press(state)
+	end
+end
+
+-- Last activity of the omp chats linked to tasks: the mtime of each session jsonl, from one
+-- `stat` over the known paths and (at most every 20 seconds per id) one `find` for new ids.
+-- Runs on the file poll, not per frame; renders when a time changed.
+local function absorb_stat(state: State, stdout: string): boolean
+	local changed = false
+	for _, f in parse_stat(stdout) do
+		state.sess_path[f.id] = f.path
+		if state.sess_mtime[f.id] ~= f.mtime then
+			state.sess_mtime[f.id] = f.mtime
+			changed = true
+		end
+	end
+	return changed
+end
+
+local function poll_sessions(state: State)
+	if state.sess_busy or not state.cfg.time then
+		return
+	end
+	local now = os.time()
+	local seen: { [string]: boolean } = {}
+	local paths: { string } = {}
+	local unknown: { string } = {}
+	for _, t in state.todos do
+		local id = t.links.omp_session
+		if id and not seen[id] and string.match(id, "^[%w%-]+$") then
+			seen[id] = true
+			local path = state.sess_path[id]
+			if path then
+				table.insert(paths, path)
+			elseif now - (state.sess_tried[id] or 0) >= 20 then
+				state.sess_tried[id] = now
+				table.insert(unknown, id)
+			end
+		end
+	end
+	local jobs = 0
+	local changed = false
+	local function done(stdout: string?)
+		if stdout and absorb_stat(state, stdout) then
+			changed = true
+		end
+		jobs -= 1
+		if jobs == 0 then
+			state.sess_busy = false
+			if changed and alive(state) then
+				state.cx:render()
+			end
+		end
+	end
+	local function run(argv: { string })
+		jobs += 1
+		state.sess_busy = true
+		local ok = pcall(tern.process.run, argv, { timeout_ms = 8000 }, function(result: ProcessResult, _)
+			done(result.stdout)
+		end)
+		if not ok then
+			done(nil)
+		end
+	end
+	if #paths > 0 then
+		local argv = { "/usr/bin/stat", "-f", "%m %N" }
+		for _, p in paths do
+			table.insert(argv, p)
+		end
+		run(argv)
+	end
+	if #unknown > 0 then
+		local argv = { "/usr/bin/find", sessions_root(), "-maxdepth", "2", "(" }
+		for i, id in unknown do
+			if i > 1 then
+				table.insert(argv, "-o")
+			end
+			table.insert(argv, "-name")
+			table.insert(argv, "*_" .. id .. ".jsonl")
+		end
+		for _, a in { ")", "-exec", "/usr/bin/stat", "-f", "%m %N", "{}", "+" } do
+			table.insert(argv, a)
+		end
+		run(argv)
 	end
 end
 
@@ -1838,6 +2378,7 @@ local function poll(state: State)
 			return
 		end
 		state.timer = nil
+		poll_sessions(state)
 		heartbeat()
 		if state.focus == nil then
 			refresh(state)
@@ -1860,6 +2401,12 @@ local function poll_states(state: State)
 		end
 		state.st_timer = nil
 		local changed = update_states(state)
+		if refresh_cfg(state) then
+			changed = true
+		end
+		if settings_requested(state) then
+			changed = true
+		end
 		if reload_if_nudged(state) then
 			changed = true
 		end
@@ -2517,6 +3064,18 @@ local function close_picker(state: State)
 	set_focus(state, nil)
 end
 
+open_settings = function(state: State)
+	state.pick = nil
+	state.settings_sel = 1
+	if state.focus then
+		set_focus(state, nil)
+	end
+	state.lift = nil
+	clear_confirm(state)
+	refresh_cfg(state)
+	state.settings_open = true
+end
+
 local function open_picker(state: State, kind: string)
 	local t = selected(state)
 	if not t then
@@ -2711,13 +3270,35 @@ local function field_node(kind: string, props: { [string]: any }, f: Field?, idl
 end
 
 local function open_count(state: State): number
+	local want = state.tab == "backlog"
 	local open = 0
 	for _, t in state.todos do
-		if not t.done and not t.archived then
+		if not t.done and not t.archived and in_backlog(t) == want then
 			open += 1
 		end
 	end
 	return open
+end
+
+local function tab_count(state: State): number
+	local want = state.tab == "backlog"
+	local n = 0
+	for _, t in state.todos do
+		if not t.archived and in_backlog(t) == want then
+			n += 1
+		end
+	end
+	return n
+end
+
+local function backlog_count(state: State): number
+	local n = 0
+	for _, t in state.todos do
+		if in_backlog(t) then
+			n += 1
+		end
+	end
+	return n
 end
 
 local function archived_count(state: State): number
@@ -2757,12 +3338,14 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 	-- Status line and badges share one wrapping line under the title, so nothing can
 	-- overflow the row however narrow the block is.
 	local meta: { Node } = {}
-	local line = agent_line(state, t, kind)
+	local line = if state.cfg.status_line then agent_line(state, t, kind) else nil
 	if line then
 		table.insert(meta, el("div", "agent-line", "line", { text = line, attrs = { ["data-kind"] = kind } }))
 	end
-	for _, badge in badges(t, live) do
-		table.insert(meta, badge)
+	if state.cfg.badges then
+		for _, badge in badges(t, live) do
+			table.insert(meta, badge)
+		end
 	end
 	if #meta > 0 then
 		table.insert(text, el("div", "meta", "meta", nil, meta))
@@ -2797,7 +3380,58 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 	if multi then
 		table.insert(kids, el("span", "tick", "tick"))
 	end
-	table.insert(kids, grip)
+	-- Time and row actions share a fixed box. Hover, confirmation or pick-up swaps them.
+	local armed = state.confirm == t.id
+	local label: string?, abs: string? = nil, nil
+	if state.cfg.time then
+		label, abs = stamp_label(state, t)
+	end
+	local slot: { Node } = {}
+	if label then
+		table.insert(slot, el("span", "time", "time", { text = label, title = abs }))
+	end
+	local actions: { Node } = {}
+	if state.cfg.row_actions then
+		if not t.archived then
+			table.insert(actions, el("button", "hbtn", "r-done", {
+				aria = if t.done then "Mark as not done" else "Mark as done",
+				title = if t.done then "Mark as not done" else "Mark as done",
+				attrs = { ["data-kind"] = if t.done then "undone" else "done", ["data-row"] = "true" },
+				actions = { click = "rdone=" .. t.id, dblclick = "tap=" .. t.id },
+			}))
+			table.insert(actions, el("button", "hbtn", "r-backlog", {
+				aria = if t.backlog then "Back to tasks" else "Move to backlog",
+				title = if t.backlog then "Back to tasks" else "Move to backlog",
+				attrs = { ["data-kind"] = if t.backlog then "unbacklog" else "backlog", ["data-row"] = "true" },
+				actions = { click = "rback=" .. t.id, dblclick = "tap=" .. t.id },
+			}))
+		end
+		table.insert(actions, el("button", "hbtn", "r-archive", {
+			aria = if t.archived then "Restore" else "Archive",
+			title = if t.archived then "Restore" else "Archive",
+			attrs = { ["data-kind"] = if t.archived then "restore" else "archive", ["data-row"] = "true" },
+			actions = { click = "rarch=" .. t.id, dblclick = "tap=" .. t.id },
+		}))
+	end
+	-- Keyboard deletion still needs a visible second-press confirmation when icons are off.
+	if state.cfg.row_actions or armed then
+		table.insert(actions, el("button", "hbtn", "r-delete", {
+			text = if armed then "Delete?" else nil,
+			aria = if armed then "Click again to delete permanently" else "Delete",
+			title = if armed then "Click again to delete permanently" else "Delete",
+			attrs = { ["data-kind"] = "delete", ["data-row"] = "true", ["data-confirm"] = if armed then "true" else "false" },
+			actions = { click = "rdel=" .. t.id, dblclick = "tap=" .. t.id },
+		}))
+	end
+	table.insert(actions, grip)
+	table.insert(slot, el("div", "row-actions", "actions", nil, actions))
+	table.insert(kids, el("div", "slot", "slot", {
+		attrs = {
+			["data-time"] = if label then "true" else "false",
+			["data-actions"] = if state.cfg.row_actions or armed then "true" else "false",
+			["data-active"] = if armed or (lifted and t.id == lifted.id) then "true" else "false",
+		},
+	}, slot))
 	return el("div", "row", t.id, {
 		attrs = {
 			["data-state"] = if picked then "selected" else "idle",
@@ -2812,21 +3446,55 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 	}, kids)
 end
 
+local function done_count(state: State): number
+	local want = state.tab == "backlog"
+	local n = 0
+	for _, t in state.todos do
+		if t.done and not t.archived and in_backlog(t) == want then
+			n += 1
+		end
+	end
+	return n
+end
+
+local function gear_button(): Node
+	return el("button", "gear", "gear", {
+		aria = "Settings",
+		title = "Settings",
+		actions = { click = "settings" },
+	})
+end
+
+
 local function left_view(state: State): Node
 	local open = open_count(state)
 	local archived = archived_count(state)
-	local subtitle = if #state.todos == 0
-		then "No tasks yet"
+	local in_tab = tab_count(state)
+	local backlog_tab = state.tab == "backlog"
+	local subtitle = if in_tab == 0
+		then (if backlog_tab then "Backlog is empty" elseif archived > 0 then "All archived" else "No tasks yet")
 		elseif open > 0 then open .. " open"
-		elseif #state.todos == archived then "All archived"
 		else "All done"
 	local picked_n = #multi_ids(state)
 	if picked_n >= 2 then
 		subtitle ..= " · " .. picked_n .. " selected"
 	end
+	local tabs = el("div", "tabs", "tabs", nil, {
+		el("button", "tabbtn", "tab-tasks", {
+			text = "Tasks",
+			attrs = { ["data-active"] = if backlog_tab then "false" else "true" },
+			actions = { click = "tab=tasks" },
+		}),
+		el("button", "tabbtn", "tab-backlog", {
+			text = "Backlog (" .. backlog_count(state) .. ")",
+			attrs = { ["data-active"] = if backlog_tab then "true" else "false" },
+			actions = { click = "tab=backlog" },
+		}),
+	})
 	local head = el("div", "head", "head", nil, {
-		el("div", "heading", "heading", { text = "Tasks" }),
+		el("div", "heading", "heading", { text = if backlog_tab then "Backlog" else "Tasks" }),
 		el("div", "subtitle", "subtitle", { text = subtitle }),
+		tabs,
 	})
 	local input = field_node("input", {
 		key = "field",
@@ -2839,7 +3507,7 @@ local function left_view(state: State): Node
 	})
 	local live = live_panes()
 	local pos: { [string]: number } = {}
-	for i, t in ordered(state.todos, true) do
+	for i, t in ordered(state.todos, state.tab, true, true) do
 		pos[t.id] = i
 	end
 	local lifted: Todo? = nil
@@ -2849,10 +3517,25 @@ local function left_view(state: State): Node
 		end
 	end
 	local rows: { Node } = {}
-	for _, t in ordered(state.todos, false) do
+	for _, t in ordered(state.todos, state.tab, false, not state.cfg.done_group) do
 		table.insert(rows, row_view(state, t, live, lifted, pos))
 	end
-	if archived > 0 then
+	local done_n = done_count(state)
+	if state.cfg.done_group and done_n > 0 then
+		table.insert(rows, el("button", "arch-head", "donehead", {
+			text = "Done (" .. done_n .. ")",
+			attrs = { ["data-open"] = if state.done_open then "true" else "false" },
+			actions = { click = "donehead" },
+		}))
+		if state.done_open then
+			for _, t in state.todos do
+				if t.done and not t.archived and in_backlog(t) == (state.tab == "backlog") then
+					table.insert(rows, row_view(state, t, live, lifted, pos))
+				end
+			end
+		end
+	end
+	if archived > 0 and state.tab == "tasks" and state.cfg.archived then
 		table.insert(rows, el("button", "arch-head", "arch", {
 			text = "Archived (" .. archived .. ")",
 			attrs = { ["data-open"] = if state.arch_open then "true" else "false" },
@@ -3066,19 +3749,6 @@ local function detail_view(state: State, t: Todo): Node
 				role = ROLE .. "detail-title",
 				aria = "Task title",
 			}, if state.focus == "title" then state.title else nil, t.title),
-			el("button", "hbtn", "archive", {
-				aria = if t.archived then "Restore" else "Archive",
-				title = if t.archived then "Restore (z)" else "Archive (z)",
-				attrs = { ["data-kind"] = if t.archived then "restore" else "archive" },
-				actions = { click = "archive" },
-			}),
-			el("button", "hbtn", "delete", {
-				text = if state.confirm == t.id then "Delete?" else nil,
-				aria = if state.confirm == t.id then "Click again to delete permanently" else "Delete",
-				title = if state.confirm == t.id then "Click again to delete permanently" else "Delete (Delete key)",
-				attrs = { ["data-kind"] = "delete", ["data-confirm"] = if state.confirm == t.id then "true" else "false" },
-				actions = { click = "delete" },
-			}),
 			el("button", "close", "close", { aria = "Close", title = "Close", actions = { click = "close" } }),
 		}),
 	}
@@ -3086,6 +3756,10 @@ local function detail_view(state: State, t: Todo): Node
 		table.insert(head, el("div", "chiprow", "chiprow", nil, {
 			el("span", "statuschip", "chip", { text = STATUS_LABEL[kind], attrs = { ["data-kind"] = kind } }),
 		}))
+	end
+	local _, _, sentence = stamp_label(state, t)
+	if state.cfg.time and sentence then
+		table.insert(head, el("div", "stampline", "stamp", { text = sentence }))
 	end
 	table.insert(head, notes)
 	table.insert(head, icons)
@@ -3139,6 +3813,10 @@ local function bulk_view(state: State, ids: { string }): Node
 		el("div", "bulk-title", "title", { text = #ids .. " tasks selected" }),
 		el("div", "bulk-sub", "sub", { text = table.concat(parts, " · ") }),
 		el("div", "bulk-buttons", "buttons", nil, {
+			el("button", "pill", "backlog", {
+				text = if bulk_all_backlog(state, ids) then "Back to tasks" else "To backlog",
+				actions = { click = "bulk=backlog" },
+			}),
 			el("button", "pill", "archive", {
 				text = if all_archived then "Restore" else "Archive",
 				actions = { click = "bulk=archive" },
@@ -3155,6 +3833,63 @@ local function bulk_view(state: State, ids: { string }): Node
 			el("button", "pill", "clear", { text = "Clear", actions = { click = "bulk=clear" } }),
 		}),
 	})
+end
+
+-- The settings sheet: Tern's picker sheet (as the project/model/chat popovers use) with one
+-- card row per setting: label, switch badge, one-line description. No query, so no search.
+local function settings_node(state: State): Node
+	local items: { any } = {}
+	local order: { any } = {}
+	for _, s in SETTINGS do
+		local on = state.cfg[s.id] == true
+		table.insert(items, {
+			id = s.id,
+			label = s.label,
+			detail = s.hint,
+			badges = { { text = if on then "On" else "Off", tone = if on then "success" else "muted" } },
+			tone = if on then "success" else "muted",
+		})
+		table.insert(order, s.id)
+	end
+	return ui.node("picker", {
+		key = "settings",
+		role = ROLE .. "settings",
+		size = "md",
+		layout = "cards",
+		preview = "none",
+		title = "Settings",
+		noun = "settings",
+		items = items,
+		order = order,
+		selected = SETTINGS[math.clamp(state.settings_sel, 1, #SETTINGS)].id,
+		actions = {
+			{ id = "settings-toggle", label = "Toggle", keys = { "space" } },
+			{ id = "settings-close", label = "Close", keys = { "esc" }, primary = true },
+		},
+	})
+end
+
+-- Keys while the settings sheet is open: it owns them all (modified keys go to Tern).
+local function settings_key(state: State, key: Key): boolean
+	if key.ctrl or key.alt or key.meta then
+		return false
+	end
+	local k = key.text or key.name
+	local n = #SETTINGS
+	if key.name == "escape" or k == "," then
+		state.settings_open = false
+	elseif key.name == "up" or k == "k" then
+		state.settings_sel = math.max(1, state.settings_sel - 1)
+	elseif key.name == "down" or k == "j" then
+		state.settings_sel = math.min(n, state.settings_sel + 1)
+	elseif key.name == "home" then
+		state.settings_sel = 1
+	elseif key.name == "end" then
+		state.settings_sel = n
+	elseif key.name == "space" or k == " " or key.name == "enter" then
+		toggle_setting(state, SETTINGS[math.clamp(state.settings_sel, 1, n)].id)
+	end
+	return true
 end
 
 local function hint_view(): Node
@@ -3208,6 +3943,8 @@ tern.block.define("list", {
 			nudge_seen = 0,
 			launched = {},
 			arch_open = false,
+			done_open = false,
+			tab = "tasks",
 			confirm = nil,
 			confirm_timer = nil,
 			lift = nil,
@@ -3217,6 +3954,16 @@ tern.block.define("list", {
 			anchor = nil,
 			confirm_bulk = false,
 			closing = {},
+			cfg = read_settings(),
+			settings_open = false,
+			settings_sel = 1,
+			settings_tap = nil,
+			settings_req = 0,
+			sess_mtime = {},
+			sess_path = {},
+			sess_tried = {},
+			sess_busy = false,
+			tick = nil,
 		}
 		running[cx.pane] = state
 		-- The add-omp-session command (window.luau) writes into the most recently opened file.
@@ -3224,12 +3971,20 @@ tern.block.define("list", {
 			pcall(tern.kv.set, "todo-proto.file", state.path)
 		end
 		state.nudge_seen = nudge_n(state) or 0
+		do
+			local rok, req = pcall(tern.kv.get, SETTINGS_REQ_KEY)
+			if rok and type(req) == "table" and type(req.n) == "number" then
+				state.settings_req = req.n
+			end
+		end
 		if state.path then
 			load(state)
 			poll(state)
 			scan_chats(state, nil)
 			update_states(state)
 			poll_states(state)
+			poll_sessions(state)
+			start_tick(state)
 		end
 		return state
 	end,
@@ -3243,6 +3998,7 @@ tern.block.define("list", {
 		if not state.path then
 			return { main = root({ hint_view() }) }
 		end
+		refresh_cfg(state)
 		if state.error then
 			local card = ui.card({ ui.span("Could not load todos", "strong") }, { ui.md(state.error) })
 			local p: { [string]: any } = card.p or {}
@@ -3258,8 +4014,7 @@ tern.block.define("list", {
 		elseif t and state.detail_open then
 			table.insert(cols, detail_view(state, t))
 		end
-		local dock = ui.col({
-			el("div", "hint", "hint", {
+		local hint = el("div", "hint", "hint", {
 				text = if state.focus == "picker"
 					then "↑↓ PgUp PgDn choose  ·  Tab complete path  ·  ⏎ pick  ·  Esc close"
 					elseif state.focus == "title"
@@ -3271,10 +4026,15 @@ tern.block.define("list", {
 					else if state.lift
 						then "Click a task to move it there  ·  click the grip or Esc to cancel"
 						elseif next(state.sel) ~= nil
-						then "⇧↑↓ extend  ·  v mark  ·  ⌘A all  ·  space done  ·  z archive  ·  ⌫⌫ delete  ·  Esc clear"
-						else "j/k move  ·  space done  ·  ⏎ open  ·  Tab add  ·  e notes  ·  F2 rename  ·  p project  ·  z archive  ·  ⌫ delete  ·  v select",
-			}),
+						then "⇧↑↓ extend  ·  v mark  ·  ⌘A all  ·  space done  ·  b backlog  ·  z archive  ·  ⌫⌫ delete  ·  Esc clear  ·  , settings"
+						else "j/k move  ·  space done  ·  ⏎ open  ·  Tab add  ·  e notes  ·  F2 rename  ·  p project  ·  b backlog  ·  B tab  ·  z archive  ·  ⌫ delete  ·  v select  ·  , settings",
 		})
+		local dockkids: { Node } = {}
+		if state.cfg.hints then
+			table.insert(dockkids, hint)
+		end
+		table.insert(dockkids, gear_button())
+		local dock = ui.col({ el("div", "dockrow", "dockrow", nil, dockkids) })
 		local dp: { [string]: any } = dock.p or {}
 		dp.role = ROLE .. "dock"
 		dock.p = dp
@@ -3282,6 +4042,8 @@ tern.block.define("list", {
 		local sheet = picker_node(state)
 		if sheet then
 			layer = ui.col({ sheet, pick_input(state) })
+		elseif state.settings_open then
+			layer = ui.col({ settings_node(state) })
 		end
 		return { main = root({ el("div", "ws", "ws", nil, cols) }), dock = dock, layer = layer }
 	end,
@@ -3289,6 +4051,9 @@ tern.block.define("list", {
 	key = function(state: State, key: Key, cx: BlockCx): boolean?
 		if not state.path then
 			return false
+		end
+		if state.settings_open then
+			return settings_key(state, key)
 		end
 		if state.focus then
 			return field_key(state, key)
@@ -3347,6 +4112,8 @@ tern.block.define("list", {
 			set_focus(state, "notes")
 		elseif key.name == "f2" or k == "n" then
 			begin_rename(state)
+		elseif k == "," then
+			open_settings(state)
 		elseif k == "p" then
 			open_picker(state, "project")
 		elseif k == "r" then
@@ -3356,6 +4123,13 @@ tern.block.define("list", {
 			if t then
 				archive_toggle(state, t)
 			end
+		elseif k == "b" then
+			local t = selected(state)
+			if t then
+				backlog_toggle(state, t)
+			end
+		elseif k == "B" then
+			switch_tab(state, if state.tab == "backlog" then "tasks" else "backlog")
 		elseif k == "Z" then
 			toggle_archived(state)
 		elseif key.name == "delete" or key.name == "backspace" then
@@ -3375,6 +4149,29 @@ tern.block.define("list", {
 	end,
 
 	event = function(state: State, ev: UiEvent, _cx: BlockCx)
+		if state.settings_open then
+			if (ev.ev == "select" or ev.ev == "activate") and type(ev.item) == "string" then
+				for i, s in SETTINGS do
+					if s.id == ev.item then
+						state.settings_sel = i
+						local now = tern.now()
+						local tap = state.settings_tap
+						state.settings_tap = { id = s.id, at = now }
+						-- A double click delivers select then activate: it flips once.
+						if ev.ev == "select" or not (tap and tap.id == s.id and now - tap.at < TAP_MS) then
+							toggle_setting(state, s.id)
+						end
+					end
+				end
+			elseif ev.ev == "action" then
+				if ev.act == "settings-toggle" then
+					toggle_setting(state, SETTINGS[math.clamp(state.settings_sel, 1, #SETTINGS)].id)
+				elseif ev.act == "settings-close" or ev.act == "close" then
+					state.settings_open = false
+				end
+			end
+			return
+		end
 		if ev.ev == "focus" and type(ev.id) == "string" then
 			local tail = string.match(ev.id, "%.(%a+)_?%d*$")
 			if tail == "field" then
@@ -3478,11 +4275,37 @@ tern.block.define("list", {
 			end
 			state.cursor = value
 			state.detail_open = true
-			for _, candidate in state.todos do
-				if candidate.id == value then
-					activate(state, candidate)
+			refresh_cfg(state)
+			if state.cfg.dblclick then
+				for _, candidate in state.todos do
+					if candidate.id == value then
+						activate(state, candidate)
+					end
 				end
 			end
+		elseif (act == "rarch" or act == "rdel") and type(value) == "string" then
+			-- A button on the row itself: it acts on that task alone, whatever is selected.
+			if repeated(state, act .. "=" .. value) then
+				return
+			end
+			local target: Todo? = nil
+			for _, candidate in state.todos do
+				if candidate.id == value then
+					target = candidate
+				end
+			end
+			if target then
+				if act == "rarch" or next(state.sel) ~= nil then
+					clear_sel(state)
+				end
+				if act == "rarch" then
+					archive_toggle(state, target)
+				else
+					delete_one(state, target)
+				end
+			end
+		elseif act == "settings" then
+			open_settings(state)
 		elseif act == "mv" then
 			step(state, if value == "up" then -1 else 1)
 		elseif act == "tap" then
@@ -3530,10 +4353,26 @@ tern.block.define("list", {
 			close_picker(state)
 		elseif act == "pick-use" and state.pick then
 			picker_key(state, { name = "enter" } :: any)
-		elseif act == "archive" and t then
-			archive_toggle(state, t)
-		elseif act == "delete" then
-			delete_press(state)
+		elseif act == "tab" and (value == "tasks" or value == "backlog") then
+			switch_tab(state, value)
+		elseif act == "rdone" and type(value) == "string" then
+			if repeated(state, "rdone=" .. value) then
+				return
+			end
+			clear_sel(state)
+			toggle_done(state, value)
+		elseif act == "rback" and type(value) == "string" then
+			if repeated(state, "rback=" .. value) then
+				return
+			end
+			for _, candidate in state.todos do
+				if candidate.id == value then
+					clear_sel(state)
+					backlog_toggle(state, candidate)
+				end
+			end
+		elseif act == "donehead" then
+			toggle_done_open(state)
 		elseif act == "arch" then
 			toggle_archived(state)
 		elseif act == "bulk" then

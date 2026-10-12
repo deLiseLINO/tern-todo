@@ -25,10 +25,13 @@ The file must be `{"todos": [...]}`. The block re-reads it every 5 s (not while 
 | r | reload the file |
 | z | archive / restore the selected task; with two or more selected, archive all, or restore all when all are archived |
 | Z | show / hide the Archived section |
+| b | move the selected task to the Backlog, or back to Tasks from there; with two or more selected, the whole selection |
+| B | switch between the Tasks and Backlog tabs |
 | Delete, Backspace | delete task records only (press twice); with two or more selected, delete the whole selection |
 | v | tick / untick the current row |
 | Shift+Up / Shift+Down | extend the selection from the anchor row |
 | Cmd+A / Ctrl+A | select all visible tasks, including archived tasks only when their section is expanded |
+| , | open / close the Settings sheet |
 | Esc | cancel a pending delete confirmation or pick-up first; otherwise clear the selection |
 
 Text fields use Tern's native editing (`features = {edit, undo}`): selection, `cmd+a`, `cmd+c`, double-click a word, undo. The block adds typing, `option+backspace`, `cmd+backspace`, `option+arrows`, redo and `ctrl+a` (select all).
@@ -46,7 +49,8 @@ Esc discards a title or notes draft. Without an external edit it restores the va
 | Cmd-click / Ctrl-click on a row | Tick / untick it. The first tick also ticks the current row. |
 | Shift-click on a row | Select the range from the anchor row to this row, across groups. The last plain-clicked or Cmd-clicked row sets the anchor. |
 | Click on the status glyph | Unchanged: toggles done for plain tasks, opens or starts for agent states. A double click on the glyph or the grip counts as one click: the second press and the row's double click are ignored. |
-| Grip (six dots, right edge of a row; shown on hover and on the selected row) | Click picks the task up. The row is outlined, rows of the same group show a drop line (above or below the row under the pointer, depending on which side of the picked task it sits), rows of the other group are dimmed. The next click on a row drops the task there. Click the grip again, press Esc or click anything else to cancel. |
+| Done, Move, Archive and Delete icons in the trailing row box | Shown on hover; also shown on a selected row without a time label. Done toggles that task's status and follows the pane-close/reopen settings. Move sends it to Backlog or back to Tasks. Archive becomes Restore for archived tasks. Delete becomes a red `Delete?`; a second click within 4 seconds removes the record only. Each acts on that row alone and clears multi-selection. The row icons can be hidden in Settings. |
+| Grip in the trailing row box | Click picks the task up. The row is outlined, rows of the same group show a drop line above or below the hovered row, and other groups are dimmed. Click a row to drop there. Click the grip again, press Esc or click anything else to cancel. |
 | `Alt+Up` / `Alt+Down` (also `Cmd+Shift+Up` / `Cmd+Shift+Down`) | Moves the selected task one place within its group. Stops at the group's edge. |
 | Arrow buttons in the card (next to the priority pill) | The same one-place move; dimmed at the edge of the group. |
 | F2, `n`, click on the card title | Rename (unchanged). Double click on a row no longer renames. |
@@ -57,7 +61,7 @@ Starting a selection cancels a grip pick-up; picking up a row clears the selecti
 
 ## Bulk panel
 
-With two or more tasks selected the task card becomes `N tasks selected`, with open, done and archived counts. Its buttons are Archive, Mark done, Delete and Clear. Archive becomes Restore when all selected tasks are archived; Mark done becomes Mark as not done when all are done. Delete first shows `Delete N?` in red; a second press deletes those records only, never their panes or omp sessions. Confirmation expires after 4 seconds and clears on Esc or a selection change.
+With two or more tasks selected the task card becomes `N tasks selected`, with open, done and archived counts. Its buttons are To backlog, Archive, Mark done, Delete and Clear. To backlog becomes Back to tasks for a backlog selection. Archive becomes Restore when all selected tasks are archived; Mark done becomes Mark as not done when all are done. Delete first shows `Delete N?` in red; a second press deletes those records only, never their panes or omp sessions. Confirmation expires after 4 seconds and clears on Esc or a selection change.
 
 Bulk archive, restore and delete each use one read-modify-write by task id. Bulk done writes once after the pane close checks finish; reopening chats then writes their new pane links. External edits, unknown keys and explicit nulls survive. IDs that disappear or become hidden leave the selection on the next re-read. In a narrow window the bulk panel sits above the list.
 
@@ -74,6 +78,42 @@ A dead pane ID is left unchanged. Bulk done shows one summary, such as `Closed 2
 Marking a task not done reopens its omp chat in a new tab with `omp --resume <id>` in the task cwd when it has a session but no live pane. A task without a session just becomes open; it does not start an agent. Repeated toggles are ignored while that task's close or reopen is in flight.
 
 Start links the exact saved omp session reported by the new pane, not the newest chat in the project directory. If no saved session is reported within about 20 seconds, the pane remains linked and the chat ID stays unset.
+
+## Row time
+
+Each row shows how long ago the task was last touched at the far right, right aligned with tabular numbers and muted colour. Labels are `now` under 60 seconds or in the future, `Nm`, `Nh`, `Nd` for 1-6 days, `Nw` for 7-29 days, `Nmo` for 30-364 days, and `Ny`. Every step floors. Time and row actions share a fixed trailing box, 168 px when action icons are enabled and 32 px otherwise. Hover fades out time before revealing the done, move, archive, delete and grip controls without shifting or overlapping the title. The selected row keeps its time when not hovered; an armed delete or picked-up row keeps its actions visible instead. The card and time tooltip show the same absolute local date. One minute-aligned timer refreshes the labels, with no per-row timers.
+
+Which moment counts:
+
+| Task | Moment |
+| --- | --- |
+| done | `completed` (falls back to `updated`, then `created`, when a done task has no `completed`) |
+| has a linked omp chat (not done) | the later of `updated` and the chat file's last activity (mtime of `~/.omp/agent/sessions/*/*_<id>.jsonl`, sampled with one `stat` on the 5 s file poll; the file is located once with `find`, retried every 20 s while it is missing) |
+| otherwise | `updated`, else `created` |
+| no valid stamp | no label |
+
+Tasks created before this version have no stamps and show no label until the block first changes them. Stamps that are not ISO-8601 (`2026-10-12T09:30:00Z`, a fraction and a `+hh:mm` offset are accepted; no zone means UTC) are ignored.
+
+## Settings
+
+The gear in the bottom right corner, the `,` key when no field has focus and the palette command `Todo: settings` open the same centred Settings sheet. The palette command `plugin.todo-proto.settings` works from the focused Todos block; elsewhere it toasts `Focus a Todos block first`. Click a row, or use Up / Down, j / k, Home / End, Space or Enter to flip the selected switch. Esc, `,`, the close button or a click outside closes it. A change applies at once; palette requests reach the block within about 2 seconds.
+
+Settings live in the plugin's kv under `settings` (`<data>/kv.json`), not in the todo file. They are shared by every Todos block and window; other blocks pick a change up within about 2 seconds and the values survive `tern plugin reload` and a restart. A key that was never set uses its default.
+
+Existing `done_group` values from the older `todo-proto.settings` store migrate once into `settings`, without overwriting values already there. The old store is removed after a successful migration; existing setting keys and defaults stay valid.
+
+| Setting | Default | Off means |
+| --- | --- | --- |
+| Show time on rows | on | no time at the right of rows, no `Updated ...` line in the card, no session file sampling |
+| Show row action icons | on | no idle Done, Move, Archive or Delete icons on rows; keyboard deletion still shows `Delete?`; the grip, keyboard shortcuts and bulk panel actions stay available |
+| Close pane when a task is done | on | marking done only changes the status; the linked pane stays open and linked |
+| Reopen chat when a task is not done | on | marking not done only changes the status; the omp chat is not resumed |
+| Double-click opens pane | on | a double click only selects the row and opens its card |
+| Show archived section | on | the Archived header and its rows on the Tasks tab are hidden; Z does nothing; archiving still works. Backlog never shows archived tasks. |
+| Show badges on rows | on | no priority / pane / omp chips under the title |
+| Show agent status on rows | on | no Working / Needs you / Ready for you / Stopped line under the title (the card chip stays) |
+| Show key hints | on | no shortcut line at the bottom of the block |
+| Done tasks as a separate group | off | done tasks stay in the main list. When on, done tasks leave the main list and sit under a collapsed `Done (N)` header, above the Archived header. Click the header to expand it. Keyboard navigation and selection only see the done rows while the group is expanded. |
 
 ## Order model
 
@@ -99,6 +139,15 @@ Bind a chord in `settings.json` (`~/Library/Application Support/Tern/settings.js
 "keybinds": { "cmd+shift+t": "plugin.todo-proto.add-omp-session" }
 ```
 
+## Automatic import of omp sessions
+
+While a Todos block is open, the plugin runs `tern inspect --json` every 10 s and adds every pane that runs omp with a saved session the file does not contain yet. The task gets the same links and title as the palette command, plus `created` and `updated` stamps, without a prompt. The open block reloads on its own. Imports go to Tasks, not Backlog.
+
+- Each session is imported at most once (kept in the plugin kv `auto-seen`, last 500 ids). Deleting an imported task does not bring it back while its pane is alive.
+- A session whose file is not saved yet, or that has no title and an `omp` pane title, is retried on the next scan.
+- The target is the most recently opened Todos block's file, as for the palette command.
+- Sessions that are already open when the block first opens are imported too.
+
 ## Data format
 
 ```json
@@ -120,6 +169,7 @@ Bind a chord in `settings.json` (`~/Library/Application Support/Tern/settings.js
 ```
 
 - `priority`: `none`, `low`, `medium`, `high`, `urgent`.
-- `due`, `links.*`, `agent.*` may be `null`. `archived` is optional (absent = not archived). `agent` is optional (model and thinking level used when the block starts or resumes the task in omp).
+- `due`, `links.*`, `agent.*` may be `null`. `archived` is optional (absent = not archived). `backlog` is optional (absent = listed on the Tasks tab; `true` = listed on the Backlog tab; archiving a task drops it). `agent` is optional (model and thinking level used when the block starts or resumes the task in omp).
 - The block rewrites the whole file on every edit with keys sorted alphabetically. Unknown keys and explicit nulls are preserved.
 - `links.tern_pane` is a pane id; it can go stale after a restart (the block then treats the task as not running).
+- `created`, `updated`, `completed`: ISO UTC strings the block maintains. `created` is set when a task is added through the block, palette command or automatic import. `updated` is set on every change of that task, including a move between Tasks and Backlog, title, notes, priority, level, model, project, chat and pane links, done and archive. Reordering within a list does not change stamps. `completed` is set when the task turns done and removed when it turns open. Moving lists keeps `created` and `completed`. Tasks the block did not change keep their values and unknown keys; external edits survive the read-modify-write.
