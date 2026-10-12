@@ -739,16 +739,9 @@
 		gap: 8px;
 	}
 
-	& [data-role='todo-proto.worktree-toggle'] {
-		align-self: flex-start;
-		color: var(--tp-faint);
-		font-size: 14px;
-		text-align: left;
-		cursor: pointer;
-	}
-
-	& [data-role='todo-proto.worktree-toggle'][aria-pressed='true'] {
-		color: var(--tp-text);
+	& [data-role='todo-proto.pillbtn'][aria-pressed='true'] {
+		background-color: rgb(from var(--t1) r g b / 12%);
+		color: var(--tp-ink);
 	}
 
 	& [data-role='todo-proto.buttons'] {
