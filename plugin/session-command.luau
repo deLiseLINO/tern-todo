@@ -38,13 +38,15 @@ local function add(cx: WindowCx)
 	end
 	local function watch(fresh: WindowCx, remaining: number)
 		local ok, result = pcall(function()
-			return fresh.session:read(pane, { as = "table", max_chars = 8000 })
+			return fresh.session:surface(pane, { as = "table", root = "main", depth = 4, nodes = 16 })
 		end)
 		if not ok or not result then
 			failed(fresh, "The session import block is no longer available.")
 			return
 		end
-		local decoded, reply = pcall(tern.json.decode, if type(result) == "table" then result.text or "" else "")
+		local decoded, reply = pcall(function()
+			return tern.json.decode(result.main.c[1].p.spans[1].t)
+		end)
 		if decoded and type(reply) == "table" then
 			if reply.phase == "error" then
 				failed(fresh, tostring(reply.error))

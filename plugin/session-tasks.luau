@@ -1,48 +1,6 @@
 --!strict
+local json = require("./json")
 local WRITE_TRIES = 3
-
--- Twin of host.luau: tern.json.decode drops `null` members, so explicit nulls are marked.
-local NULL_MARK = "__todo_proto_null__"
-
-local function mark_nulls(text: string): string
-	local out: { string } = {}
-	local from, i, n = 1, 1, #text
-	local in_string = false
-	while i <= n do
-		local c = string.sub(text, i, i)
-		if in_string then
-			if c == "\\" then
-				i += 1
-			elseif c == '"' then
-				in_string = false
-			end
-		elseif c == '"' then
-			in_string = true
-		elseif c == ":" then
-			local s, e = string.find(text, "^%s*null", i + 1)
-			if s and not string.match(string.sub(text, e + 1, e + 1), "[%w_]") then
-				table.insert(out, string.sub(text, from, e - 4))
-				table.insert(out, '"' .. NULL_MARK .. '"')
-				from = e + 1
-				i = e
-			end
-		end
-		i += 1
-	end
-	table.insert(out, string.sub(text, from))
-	return table.concat(out)
-end
-
-local function restore_nulls(value: any): any
-	if value == NULL_MARK then
-		return tern.json.null
-	elseif type(value) == "table" then
-		for k, v in value do
-			value[k] = restore_nulls(v)
-		end
-	end
-	return value
-end
 
 local function iso_now(): string
 	return os.date("!%Y-%m-%dT%H:%M:%SZ", os.time())
@@ -57,11 +15,10 @@ local function edit_file(path: string, change: ({ any }) -> boolean): (boolean, 
 	if not ok then
 		return false, "Cannot read " .. path
 	end
-	local dok, data = pcall(tern.json.decode, mark_nulls(text))
+	local dok, data = pcall(json.decode, text)
 	if not dok or type(data) ~= "table" or type(data.todos) ~= "table" then
 		return false, "Todo file is not valid JSON"
 	end
-	data = restore_nulls(data)
 	local list = tern.json.array(data.todos)
 	if not change(list) then
 		return false, nil
