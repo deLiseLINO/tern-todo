@@ -19,6 +19,8 @@ tern ctl plugins run plugin.todo-proto.open
 
 The command opens `todo-proto.list` without a file argument. The host selects its last task file from `tern.kv` key `todo-proto.file`, or `$HOME/todos.todo.json` if no file was saved. It creates `{"todos": []}` only when that file is absent. Existing files are read, not reset. An unreadable file, invalid JSON, a creation failure, or missing host `HOME` appears as an error in the block. A missing or failed host plugin produces a toast instead.
 
+The palette offers **Todo: open tasks** as the only task-list opening command. The automatic **New Todos block** entry is hidden; file opens and **Open with Todos** remain available.
+
 To open a different file, pass its path explicitly:
 
 ```sh
