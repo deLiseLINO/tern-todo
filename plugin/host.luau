@@ -378,7 +378,7 @@ local function parse(text: string): ({ Todo }?, string?)
 				due = if type(item.due) == "string" then item.due else nil,
 				done = item.done == true,
 				archived = item.archived == true,
-				backlog = item.backlog == true,
+				backlog = item.backlog == true and item.done ~= true,
 				links = {
 					tern_pane = tonumber(links.tern_pane),
 					cwd = str_or_nil(links.cwd),
@@ -800,6 +800,9 @@ local function rewrite(state: State, change: ({ any }) -> boolean?): boolean
 	local now = iso_now()
 	for _, item in list do
 		if type(item) == "table" and type(item.id) == "string" then
+			if item.done == true then
+				item.backlog = nil
+			end
 			local before = snap[item.id]
 			if before == nil then
 				if item.created == nil then
@@ -1277,6 +1280,9 @@ local function backlog_ids(state: State, ids: { string })
 		for _, item in list do
 			if type(item) == "table" and set[item.id] then
 				item.backlog = if target then true else nil
+				if target then
+					item.done = false
+				end
 			end
 		end
 	end)
