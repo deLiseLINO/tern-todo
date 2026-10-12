@@ -68,7 +68,7 @@ To toggle automatic installation from the attached window's terminal:
 tern ctl plugins run plugin.todo-proto.remote-auto-install
 ```
 
-This command supports host-local task opening. The existing window-side agent status, automatic omp import, add-session command, and settings requests use local processes or kv relays. They are not a complete cross-host integration. Do not rely on those relays to control or edit tasks on another host.
+Task opening and the manual add-session command use the selected host's task file. Window-side agent status, automatic omp import, and settings requests still use local processes or kv relays. They are not a complete cross-host integration. Do not rely on those remaining relays to control or edit tasks on another host.
 
 ### Requirements and platform limits
 
@@ -79,7 +79,7 @@ This command supports host-local task opening. The existing window-side agent st
 - omp is optional for plain tasks, but required to start or resume agents and load models or chats. `OMP_BIN` overrides its location. Otherwise the host looks in `$HOME/.local/bin`, `$HOME/.bun/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, then tries `omp`.
 - The plugin calls Tern for pane inspection, focus, creation, process inspection, and closing. It calls `/usr/bin/head` for omp session headers, `/usr/bin/find` and `/usr/bin/stat` for session discovery and times, and `/bin/ls` for project directory completion.
 - `fswatch` is optional. The plugin expects `/opt/homebrew/bin/fswatch`, installed on Apple Silicon macOS with `brew install fswatch`. It reloads a changed file within about 0.2 seconds when the watcher runs, except while a text field has focus. A 5-second file poll is the fallback.
-- Repository installation and the basic JSON task list can run on macOS and Linux hosts with Tern plugins. Agent and session helpers still target macOS through BSD `stat -f` and fixed utility paths. Full Linux omp integration and Windows are not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
+- Repository installation, the basic JSON task list, and manual omp-session import run on macOS and Linux hosts with Tern plugins. Other agent and session helpers still target macOS through BSD `stat -f` and fixed utility paths. Full Linux omp integration and Windows are not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
 
 ### Files and state
 
@@ -222,8 +222,8 @@ The order of the `todos` array in the JSON file is the order of the list inside 
 
 `Todo: add this omp session to tasks` (group `Todo`, action `plugin.todo-proto.add-omp-session`). Run it from the pane that runs omp.
 
-- The target file is the most recently opened Todos block's file (published in the plugin's kv as `todo-proto.file`). If no block was opened yet it says `Open the Tasks block once (tern open <file>.todo.json)`.
-- The session file comes from `tern inspect --json` (`omp_session_file` of the focused pane). The task title is prefilled with the omp session title; Enter accepts, edit to change, Esc or an empty title cancels. The stored id is the one `omp --resume <id>` takes.
+- The target file is the most recently opened Tasks block's file on the selected host, saved as `todo-proto.file`. Open Tasks once on that host before adding a session. Todo must be version 0.3.1 or later on both the local window and the remote host; automatic installation does not upgrade an existing package.
+- A temporary background plugin block reads the focused pane's `omp_session_file` and its first two session-file lines on that same host. It never types into the omp pane or copies local tasks to the host. The title prompt stays in your window; Enter accepts, Esc or an empty title cancels. The temporary block closes after completion or cancellation. The stored id is the one `omp --resume <id>` takes.
 - The task gets `links.tern_pane`, `links.cwd`, `links.omp_session`, priority `none`, no due date.
 - A session (or a pane without a session) that is already linked is not added again: the toast says `Already in tasks` and missing or stale links are filled in. Nothing is prompted in that case.
 - Errors (no omp in the pane, session not saved yet, the focused pane is not a terminal) toast and leave the file unchanged.

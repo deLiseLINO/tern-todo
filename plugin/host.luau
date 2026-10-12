@@ -28,6 +28,7 @@
 
 local ui = tern.ui
 local session = require("./session")
+require("./session-import")
 
 local POLL_MS = 5 * 1000
 -- fswatch reports a file change within about WATCH_LATENCY_S; POLL_MS stays as the fallback when it is missing or misses an event.

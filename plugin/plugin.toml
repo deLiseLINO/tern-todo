@@ -1,7 +1,7 @@
 schema = 1
 id = "todo-proto"
 name = "Todo Prototype"
-version = "0.3.0"
+version = "0.3.1"
 description = "Personal to-do list linked to Tern panes and omp sessions (prototype)."
 icon = "check"
 host = "host.luau"
@@ -13,3 +13,8 @@ id = "list"
 title = "Todos"
 palette = false
 files = ["todos*.json", "tern-todo*.json"]
+
+[[blocks]]
+id = "session-import"
+title = "Add omp session"
+palette = false
