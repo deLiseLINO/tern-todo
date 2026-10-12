@@ -13,7 +13,7 @@ Use `https://github.com/deLiseLINO/tern-todo` for all branches and pull requests
 Use `deLiseLINO <52623978+deLiseLINO@users.noreply.github.com>` for commits and disable commit signing. Check the configured identity before the first commit.
 Write commit messages, pull request titles, descriptions, and GitHub comments in English. Titles use `type(scope): subject`, with an imperative subject and no trailing period. Reply to the user in Russian.
 After each task that changes this repository, open a ready pull request into `main` using the poteto `opening-a-pr` playbook. Use the sections `## Why`, `## Scope`, `## Blast Radius`, and `## Verification`. Report only verification that actually ran.
-Merge with `gh pr merge --repo deLiseLINO/tern-todo --squash --auto`. After the merge, update the primary tern-todo checkout from `origin/main` without discarding local changes, then remove the task worktree.
+Merge with `gh pr merge <number> --repo deLiseLINO/tern-todo --squash --auto`. After the merge, update the primary tern-todo checkout from `origin/main` without discarding local changes, then remove the task worktree.
 
 ## Parent repository
 
