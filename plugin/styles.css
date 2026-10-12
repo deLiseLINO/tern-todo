@@ -731,8 +731,25 @@
 		color: var(--tp-faint);
 	}
 
-	& [data-role='todo-proto.agent-row'] [data-role='todo-proto.pillbtn'][data-icon='folder'] {
-		max-width: min(100%, 260px);
+	& [data-role='todo-proto.agent-group'] {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: nowrap;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	& [data-role='todo-proto.agent-group'] [data-role='todo-proto.pillbtn'][data-icon='folder'] {
+		display: block;
+		flex: 0 1 auto;
+		min-width: 0;
+		line-height: 1.4;
+	}
+
+	& [data-role='todo-proto.agent-group'] [data-role='todo-proto.pillbtn'][data-icon='none'] {
+		flex: none;
 	}
 
 	& [data-role='todo-proto.agent-row'] {
