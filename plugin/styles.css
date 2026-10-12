@@ -739,6 +739,18 @@
 		gap: 8px;
 	}
 
+	& [data-role='todo-proto.worktree-toggle'] {
+		align-self: flex-start;
+		color: var(--tp-faint);
+		font-size: 14px;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	& [data-role='todo-proto.worktree-toggle'][aria-pressed='true'] {
+		color: var(--tp-text);
+	}
+
 	& [data-role='todo-proto.buttons'] {
 		display: flex;
 		flex-direction: row;

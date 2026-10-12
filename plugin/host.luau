@@ -117,6 +117,7 @@ local SETTINGS: { { id: string, label: string, hint: string, default: boolean } 
 	{ id = "close_on_done", label = "Close pane when a task is done", hint = "Done closes the linked pane unless the agent is busy.", default = true },
 	{ id = "reopen_on_undone", label = "Reopen chat when a task is not done", hint = "Not done resumes the task's omp chat in a new tab.", default = true },
 	{ id = "focus_on_start", label = "Open pane when a task starts", hint = "Switch to the new tab right away. Off opens it in the background.", default = true },
+	{ id = "new_chat_worktree", label = "Create new chats in a worktree", hint = "Start new chats in a separate Git worktree. Existing chats keep their directory.", default = true },
 	{ id = "dblclick", label = "Double-click opens pane", hint = "Double-click does what Enter does: focus, resume or start.", default = true },
 	{ id = "archived", label = "Show archived section", hint = "The Archived list below the tasks.", default = true },
 	{ id = "badges", label = "Show badges on rows", hint = "Priority, pane and omp chips under the title.", default = true },
@@ -1749,49 +1750,103 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 		return
 	end
 	local cwd = t.links.cwd or state.cx.cwd or home_dir()
-	local cmd = { TERN, "new", "tab", "--json", "--cwd", cwd, "--" }
-	for _, a in argv do
-		table.insert(cmd, a)
-	end
 	local id = t.id
 	state.launching[id] = true
-	local ok, err = pcall(tern.process.run, cmd, { timeout_ms = 10000 }, function(result: ProcessResult, _)
-		state.launching[id] = nil
-		if result.status ~= 0 then
-			local first = string.match(result.stderr, "[^\n]+") or ("exit " .. result.status)
-			state.cx:toast("error", "tern new tab failed", first)
-			return
+	local function open_tab(directory: string)
+		local cmd = { TERN, "new", "tab", "--json", "--cwd", directory, "--" }
+		for _, a in argv do
+			table.insert(cmd, a)
 		end
-		local pane = pane_from(result.stdout)
-		if not pane then
-			state.cx:toast("error", "tern new tab gave no pane id", result.stdout)
-			return
-		end
-		if not alive(state) then
-			return
-		end
-		if state.cfg.focus_on_start then
-			-- `tern new tab` leaves the new tab in the background: show it.
-			pcall(tern.process.run, { TERN, "focus", tostring(pane) }, { timeout_ms = 5000 }, function(shown: ProcessResult, _)
-				if shown.status ~= 0 then
-					state.cx:toast("error", "tern focus failed", shown.stderr)
+		local ok, err = pcall(tern.process.run, cmd, { timeout_ms = 10000 }, function(result: ProcessResult, _)
+			state.launching[id] = nil
+			if result.status ~= 0 then
+				local first = string.match(result.stderr, "[^\n]+") or ("exit " .. result.status)
+				state.cx:toast("error", "tern new tab failed", first)
+				return
+			end
+			local pane = pane_from(result.stdout)
+			if not pane then
+				state.cx:toast("error", "tern new tab gave no pane id", result.stdout)
+				return
+			end
+			if not alive(state) then
+				return
+			end
+			if state.cfg.focus_on_start then
+				-- `tern new tab` leaves the new tab in the background: show it.
+				pcall(tern.process.run, { TERN, "focus", tostring(pane) }, { timeout_ms = 5000 }, function(shown: ProcessResult, _)
+					if shown.status ~= 0 then
+						state.cx:toast("error", "tern focus failed", shown.stderr)
+					end
+				end)
+			end
+			patch(state, id, function(item)
+				local links = if type(item.links) == "table" then item.links else {}
+				links.tern_pane = pane
+				if find_session then
+					links.cwd = directory
 				end
+				item.links = links
 			end)
-		end
-		patch(state, id, function(item)
-			local links = if type(item.links) == "table" then item.links else {}
-			links.tern_pane = pane
-			item.links = links
+			state.launched[pane] = os.time()
+			state.cx:render()
+			if find_session then
+				discover_session(state, id, pane, tern.now() + 20000)
+			end
 		end)
-		state.launched[pane] = os.time()
+		if not ok then
+			state.launching[id] = nil
+			state.cx:toast("error", "Cannot run tern", tostring(err))
+		end
+	end
+	if not find_session or not state.cfg.new_chat_worktree then
+		open_tab(cwd)
+		return
+	end
+	local function failed(message: string)
+		state.launching[id] = nil
+		state.cx:toast("error", "Cannot create worktree", message)
 		state.cx:render()
-		if find_session then
-			discover_session(state, id, pane, tern.now() + 20000)
+	end
+	local ok, err = pcall(tern.process.run, {
+		"/usr/bin/git", "-C", cwd, "for-each-ref", "--format=%(refname)",
+		"refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/heads/main",
+		"refs/remotes/origin/master", "refs/heads/master",
+	}, { timeout_ms = 5000 }, function(refs: ProcessResult, _)
+		if not alive(state) then
+			state.launching[id] = nil
+			return
+		end
+		local base: string? = nil
+		for _, ref in { "refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/heads/main", "refs/remotes/origin/master", "refs/heads/master" } do
+			if string.find("\n" .. refs.stdout, "\n" .. ref .. "\n", 1, true) then
+				base = ref
+				break
+			end
+		end
+		if refs.status ~= 0 or not base then
+			failed(if refs.status ~= 0 then refs.stderr else "The project has no main or master branch")
+			return
+		end
+		local name = "todo-" .. string.gsub(id, "[^%w%-]", "-") .. "-" .. tostring(os.time()) .. "-" .. tostring(math.random(1, 1000000000))
+		local directory = home_dir() .. "/.omp/wt/" .. name
+		local added, reason = pcall(tern.process.run, {
+			"/usr/bin/git", "-C", cwd, "worktree", "add", "-b", name, directory, base :: string,
+		}, { timeout_ms = 120000 }, function(result: ProcessResult, _)
+			if result.status ~= 0 then
+				failed(result.stderr)
+			elseif alive(state) then
+				open_tab(directory)
+			else
+				state.launching[id] = nil
+			end
+		end)
+		if not added then
+			failed(tostring(reason))
 		end
 	end)
 	if not ok then
-		state.launching[id] = nil
-		state.cx:toast("error", "Cannot run tern", tostring(err))
+		failed(tostring(err))
 	end
 end
 
@@ -3879,6 +3934,12 @@ local function detail_view(state: State, t: Todo): Node
 		el("div", "agent-row", "r3", nil, {
 			pill_box(state, "chat", "chat", chat_title(state, t), nil, nil),
 		}),
+		el("button", "worktree-toggle", "worktree", {
+			text = if state.cfg.new_chat_worktree then "☑ Create new chat in a worktree" else "☐ Create new chat in a worktree",
+			aria = "Create new chat in a worktree",
+			attrs = { ["aria-pressed"] = if state.cfg.new_chat_worktree then "true" else "false" },
+			actions = { click = "worktree" },
+		}),
 	})
 	local buttons = el("div", "buttons", "buttons", nil, {
 		el("button", "pill", "open", { text = primary_label(t), actions = { click = "primary" } }),
@@ -4390,6 +4451,10 @@ tern.block.define("list", {
 		-- Anything but a row click, the grip or a row double click puts a picked-up task down.
 		if state.lift and act ~= "sel" and act ~= "lift" and act ~= "open" and act ~= "tap" then
 			state.lift = nil
+		end
+		if act == "worktree" then
+			toggle_setting(state, "new_chat_worktree")
+			return
 		end
 		if act == "sel" and type(value) == "string" then
 			if state.focus then
