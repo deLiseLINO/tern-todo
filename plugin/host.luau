@@ -185,6 +185,8 @@ type State = {
 	chats: { Chat }?,
 	chats_loading: boolean,
 	chats_token: number,
+	-- When the chat list was last rescanned for a linked chat it lacked, per session id.
+	chats_tried: { [string]: number },
 	-- omp state per linked pane ("working", "waiting_input", "idle", "exited"), written by
 	-- window.luau into tern.kv "states" and read here (see window.luau for the handshake).
 	agent_states: { [string]: string },
@@ -1557,6 +1559,7 @@ end
 -- Lists recent sessions without a shell: one `find`+`stat` for every file's mtime, then one
 -- `head -n 2` over the newest of them (title slot and header lines only, never whole files).
 -- Files of the `cwd` bucket are preferred so a project's own chats are not pushed out.
+-- Chats linked to a task are always read, so their pills never fall back to the bare id.
 local function scan_chats(state: State, cwd: string?)
 	state.chats_token += 1
 	local token = state.chats_token
@@ -1583,8 +1586,16 @@ local function scan_chats(state: State, cwd: string?)
 			local chosen: { SessionFile } = {}
 			local mtimes: { [string]: number } = {}
 			local near, far = 0, 0
+			local linked: { [string]: boolean } = {}
+			for _, t in state.todos do
+				if t.links.omp_session then
+					linked[t.links.omp_session] = true
+				end
+			end
 			for _, f in files do
-				if bucket and f.dir == bucket and near < 25 then
+				if linked[f.id] then
+					table.insert(chosen, f)
+				elseif bucket and f.dir == bucket and near < 25 then
 					near += 1
 					table.insert(chosen, f)
 				elseif far < 40 then
@@ -3995,6 +4006,8 @@ local function level_pill(level: string?): Node
 	}, kids)
 end
 
+-- The title of the task's chat. A chat the list lacks (new, or older than the scan limit)
+-- triggers a rescan that reads it; one still missing afterwards is retried every 20 seconds.
 local function chat_title(state: State, t: Todo): string
 	local id = t.links.omp_session
 	if not id then
@@ -4005,7 +4018,13 @@ local function chat_title(state: State, t: Todo): string
 			return c.title
 		end
 	end
-	return "Chat " .. string.sub(id, 1, 8)
+	local tried = state.chats_tried[id]
+	if not state.chats_loading and (tried == nil or os.time() - tried >= 20) then
+		state.chats_tried[id] = os.time()
+		scan_chats(state, nil)
+		return "Loading chat…"
+	end
+	return if state.chats_loading or tried == nil then "Loading chat…" else "Unknown chat"
 end
 
 local function detail_view(state: State, t: Todo): Node
@@ -4268,6 +4287,7 @@ tern.block.define("list", {
 			chats = nil,
 			chats_loading = false,
 			chats_token = 0,
+			chats_tried = {},
 			agent_states = {},
 			debug_states = {},
 			states_sig = "",

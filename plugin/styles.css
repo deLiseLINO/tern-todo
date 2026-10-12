@@ -640,9 +640,8 @@
 	}
 
 	& [data-role='todo-proto.pillbtn'] {
-		display: flex;
-		flex-direction: row;
-		align-items: center;
+		display: block;
+		line-height: 1.4;
 		max-width: 100%;
 		padding: 8px 34px 8px 16px;
 		border-radius: 999px;
@@ -657,6 +656,12 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		cursor: pointer;
+	}
+
+	& [data-role='todo-proto.pillbtn'][data-level] {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
 	}
 
 	& [data-role='todo-proto.pillbtn']:hover,
@@ -742,10 +747,8 @@
 	}
 
 	& [data-role='todo-proto.agent-group'] [data-role='todo-proto.pillbtn'][data-icon='folder'] {
-		display: block;
 		flex: 0 1 auto;
 		min-width: 0;
-		line-height: 1.4;
 	}
 
 	& [data-role='todo-proto.agent-group'] [data-role='todo-proto.pillbtn'][data-icon='none'] {
