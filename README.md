@@ -52,13 +52,29 @@ To switch a linked package to a repository installation, run `tern plugin unlink
 
 ### Remote hosts
 
-Install the plugin on each Tern host where you want a Tasks block, then check `tern plugin list` on that host. Switch the window to that host before running **Todo: open tasks**. The command does not read a window-local file or saved path. The host chooses its own task file using its own `todo-proto.file` setting and `HOME`; it does not copy tasks from your local machine.
+Automatic installation is off by default. On the local window, run **Todo: automatic installation on remote hosts** to toggle the saved setting. Todo checks connected remote hosts every two seconds and installs `github.com/deLiseLINO/tern-todo/plugin` only where the package is missing. It never updates an installed copy, replaces a development link, or enables a disabled plugin.
+
+The installer runs through Tern's attached host connection, not SSH. It creates a dedicated shell pane and restores your previous focus. It closes that pane after success only if you have not focused it and its own command has finished. Failures leave the pane open and report the host in a notification. Automatic attempts stop after a failure until the host reconnects. You can also run **Todo: open tasks** to retry. Turning the setting off stops new installations, not an installer already running.
+
+Switch the window to the remote host before running **Todo: open tasks**. If Todo is missing and automatic installation is enabled, the command waits for installation and the host catalog. If you switch hosts or sessions meanwhile, it does not open a block in the wrong place. Manual installation remains available with `tern plugin install github.com/deLiseLINO/tern-todo/plugin`.
+
+Each host selects its own task file from its `todo-proto.file` setting or `HOME`. Installation does not copy your local task file.
+
+Concurrent installers use a private lock at `$HOME/.tern-todo-remote-install/install.lock`. Normal exit and caught signals remove only the installer's own lock. A killed process can leave a stale lock. Inspect its `pid` file and confirm that PID is no longer running before removing the file with `rm "$HOME/.tern-todo-remote-install/install.lock/pid"` and the empty directory with `rmdir "$HOME/.tern-todo-remote-install/install.lock"`. Reconnect to retry. Never remove an active installer's lock.
+
+To toggle automatic installation from the attached window's terminal:
+
+```sh
+tern ctl plugins run plugin.todo-proto.remote-auto-install
+```
 
 This command supports host-local task opening. The existing window-side agent status, automatic omp import, add-session command, and settings requests use local processes or kv relays. They are not a complete cross-host integration. Do not rely on those relays to control or edit tasks on another host.
 
 ### Requirements and platform limits
 
-- Tern must support Luau plugins and `WindowCx:new_block` on the current host. Git is required for repository installation and updates.
+- Tern must support Luau plugins and `WindowCx:new_block` on the current host. Automatic installation also requires native host terminals and pane inspection in the local window. Remote hosts must already be attached and trusted, with a running Tern daemon and its plugin CLI. The installer does not bootstrap Tern or bypass host verification.
+- Automatic remote installation requires Unix `/bin/sh`, `HOME`, standard shell utilities, and writable user-owned home and plugin directories. Git and GitHub access are required only when Todo is missing. No SSH, jq, or Python is needed. Initial installation must pass a runtime reload and report Todo ready. Unrelated plugin errors can also fail the reload.
+- The remote installer resolves its host's `TERN_BIN`, then `$HOME/.local/bin/tern`, then `tern` on the shell's `PATH`. Set `TERN_BIN` if neither standard path finds the CLI.
 - The daemon must receive `HOME` for a default task file. Set `TERN_BIN` to an absolute executable path if Tern is installed elsewhere. Each plugin half resolves it once, in this order: `TERN_BIN`, `$HOME/.local/bin/tern`, `/opt/homebrew/bin/tern`, `/usr/local/bin/tern`, `/usr/bin/tern`, then `tern` through its process environment's `PATH`. An explicit override is used as given. Restart the daemon or reload the plugin after changing its environment.
 - omp is optional for plain tasks, but required to start or resume agents and load models or chats. `OMP_BIN` overrides its location. Otherwise the host looks in `$HOME/.local/bin`, `$HOME/.bun/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`, then tries `omp`.
 - The plugin calls Tern for pane inspection, focus, creation, process inspection, and closing. It calls `/usr/bin/head` for omp session headers, `/usr/bin/find` and `/usr/bin/stat` for session discovery and times, and `/bin/ls` for project directory completion.

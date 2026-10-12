@@ -1,6 +1,7 @@
 --!strict
 -- `tern open <name>.todo.json` opens the file as a Todos block instead of a file viewer.
 local session = require("./session")
+local remote = require("./remote")
 
 tern.route.open(function(req, _cx)
 	if string.match(req.path, "%.todo%.json$") then
@@ -14,16 +15,7 @@ tern.command({
 	title = "Todo: open tasks",
 	group = "Todo",
 	icon = "check",
-	run = function(cx: WindowCx)
-		local ok, pane = pcall(function()
-			return cx:new_block("todo-proto.list", {})
-		end)
-		if not ok then
-			cx:toast("error", "Cannot open Todo on this host", "The host plugin failed: " .. tostring(pane))
-		elseif not pane then
-			cx:toast("error", "Todo plugin is not ready on this host", "Install github.com/deLiseLINO/tern-todo/plugin on this host and check tern plugin list for errors.")
-		end
-	end,
+	run = remote.open,
 })
 
 -- omp agent states for the Todos block. Only the window half can read agent blocks
