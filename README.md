@@ -153,6 +153,8 @@ The agent status stays `Needs you` while an omp `ask` question is visible in the
 
 Each row shows how long ago the task was last touched at the far right, right aligned with tabular numbers and muted colour. Labels are `now` under 60 seconds or in the future, `Nm`, `Nh`, `Nd` for 1-6 days, `Nw` for 7-29 days, `Nmo` for 30-364 days, and `Ny`. Every step floors. Time and row actions share a fixed trailing box, 168 px when action icons are enabled and 32 px otherwise. Hover fades out time before revealing the done, move, archive, delete and grip controls without shifting or overlapping the title. The selected row keeps its time when not hovered; an armed delete or picked-up row keeps its actions visible instead. The card and time tooltip show the same absolute local date. One minute-aligned timer refreshes the labels, with no per-row timers.
 
+Rows hide the relative time only while the agent is Working. Starting, Needs you, Ready for you, Stopped and done tasks keep their time labels. The time returns when the agent stops working, even if the agent status line is hidden in Settings. The timestamp in the task card stays visible during work.
+
 Which moment counts:
 
 | Task | Moment |

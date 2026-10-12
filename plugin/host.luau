@@ -3582,7 +3582,7 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 	-- Time and row actions share a fixed box. Hover, confirmation or pick-up swaps them.
 	local armed = state.confirm == t.id
 	local label: string?, abs: string? = nil, nil
-	if state.cfg.time then
+	if state.cfg.time and kind ~= "running" then
 		label, abs = stamp_label(state, t)
 	end
 	local slot: { Node } = {}
