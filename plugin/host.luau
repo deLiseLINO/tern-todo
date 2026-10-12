@@ -3930,15 +3930,10 @@ local function detail_view(state: State, t: Todo): Node
 		}),
 		el("div", "agent-row", "r2", nil, {
 			pill_box(state, "project", "cwd", if t.links.cwd then basename(t.links.cwd) else "No project", nil, "folder"),
+			click_pill("worktree", if state.cfg.new_chat_worktree then "Worktree" else "Local", nil, "none", "worktree"),
 		}),
 		el("div", "agent-row", "r3", nil, {
 			pill_box(state, "chat", "chat", chat_title(state, t), nil, nil),
-		}),
-		el("button", "worktree-toggle", "worktree", {
-			text = if state.cfg.new_chat_worktree then "☑ Create new chat in a worktree" else "☐ Create new chat in a worktree",
-			aria = "Create new chat in a worktree",
-			attrs = { ["aria-pressed"] = if state.cfg.new_chat_worktree then "true" else "false" },
-			actions = { click = "worktree" },
 		}),
 	})
 	local buttons = el("div", "buttons", "buttons", nil, {
