@@ -78,6 +78,7 @@ end
 local function sample(cx: WindowCx)
 	local ok, watch = pcall(tern.kv.get, "watch")
 	if not ok or type(watch) ~= "number" or os.time() - watch > WATCH_FRESH_S then
+		previous_panes = {}
 		return
 	end
 	local panes: { [number]: boolean } = {}

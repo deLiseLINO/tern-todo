@@ -1964,8 +1964,9 @@ local function update_states(state: State): boolean
 	end
 	local completed = false
 	if state.focus == nil and next(state.closing) == nil and next(state.launching) == nil and next(closed) ~= nil then
-		local matched = false
+		local matched: boolean? = nil
 		completed = rewrite(state, function(list)
+			matched = false
 			local changed = false
 			for _, item in list do
 				if type(item) == "table" and type(item.links) == "table" then
@@ -1980,7 +1981,7 @@ local function update_states(state: State): boolean
 			end
 			return changed
 		end)
-		if completed or not matched then
+		if completed or matched == false then
 			state.closed_panes = events
 		end
 	end
