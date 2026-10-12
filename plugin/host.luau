@@ -1,5 +1,4 @@
 --!strict
--- The `list` block: a Synara-style Tasks view over the JSON file named by args[1].
 -- The file is re-read every 5 seconds, except while a text field or popover has focus.
 --
 -- Keys (no field focused): j/k or up/down move, space or x toggles done, Enter
@@ -41,7 +40,7 @@ local POLL_MS = 5 * 1000
 local FSWATCH = "/opt/homebrew/bin/fswatch"
 local WATCH_LATENCY_S = "0.1"
 local WATCH_RUN_MS = 15 * 1000
-local TERN = "/Users/delise/.local/bin/tern"
+local TERN = require("./executable").tern_bin()
 local ROLE = "todo-proto."
 local PRIORITIES = { "none", "low", "medium", "high", "urgent" }
 local PRIORITY_LABEL: { [string]: string } = {
@@ -4033,14 +4032,38 @@ local function settings_key(state: State, key: Key): boolean
 	return true
 end
 
-local function hint_view(): Node
-	local card = ui.card({ ui.span("Todo Prototype", "strong") }, {
-		ui.md("No data file given. Open this block with the path to the JSON file as its argument."),
-	})
-	local p: { [string]: any } = card.p or {}
-	p.tone = "muted"
-	card.p = p
-	return card
+local function task_path(args: { string }, saved: any): (string?, string?)
+	if args[1] then
+		return args[1], nil
+	end
+	if type(saved) == "table" and type(saved.path) == "string" and saved.path ~= "" then
+		return saved.path, nil
+	end
+	local ok, last = pcall(tern.kv.get, "todo-proto.file")
+	if not ok then
+		return nil, "Cannot read the last task file setting: " .. tostring(last)
+	end
+	local path: string
+	if type(last) == "string" and last ~= "" then
+		path = last
+	else
+		local home = tern.getenv("HOME")
+		if not home or home == "" then
+			return nil, "HOME is not set on this host. Open an explicit task file or set HOME for the Tern daemon."
+		end
+		path = string.gsub(home, "/+$", "") .. "/todos.todo.json"
+	end
+	local exists_ok, exists = pcall(tern.fs.exists, path)
+	if not exists_ok then
+		return nil, "Cannot check task file " .. path .. ": " .. tostring(exists)
+	end
+	if not exists then
+		local wrote, reason = pcall(tern.fs.write, path, tern.json.encode({ todos = tern.json.array() }, true) .. "\n")
+		if not wrote then
+			return nil, "Cannot create task file " .. path .. ": " .. tostring(reason)
+		end
+	end
+	return path, nil
 end
 
 local function root(children: { Node }): Node
@@ -4052,17 +4075,18 @@ local function root(children: { Node }): Node
 end
 
 tern.block.define("list", {
-	init = function(cx: BlockCx, args: { string }, _saved: any): State
+	init = function(cx: BlockCx, args: { string }, saved: any): State
 		local previous = running[cx.pane]
 		if previous then
 			retire(previous)
 		end
+		local path, path_error = task_path(args, saved)
 		local state: State = {
 			cx = cx,
-			path = args[1],
+			path = path,
 			todos = {},
 			cursor = nil,
-			error = nil,
+			error = path_error,
 			timer = nil,
 			focus = nil,
 			detail_open = true,
@@ -4133,16 +4157,16 @@ tern.block.define("list", {
 		return state
 	end,
 
+	save = function(state: State): any
+		return { path = state.path }
+	end,
+
 	features = { "edit", "undo" },
 	title = function(state: State): string?
 		return "Tasks (" .. open_count(state) .. ")"
 	end,
 
 	view = function(state: State, _cx: BlockCx): BlockView
-		if not state.path then
-			return { main = root({ hint_view() }) }
-		end
-		refresh_cfg(state)
 		if state.error then
 			local card = ui.card({ ui.span("Could not load todos", "strong") }, { ui.md(state.error) })
 			local p: { [string]: any } = card.p or {}
@@ -4150,6 +4174,7 @@ tern.block.define("list", {
 			card.p = p
 			return { main = root({ card }) }
 		end
+		refresh_cfg(state)
 		local cols: { Node } = { left_view(state) }
 		local t = selected(state)
 		local picked_ids = multi_ids(state)
