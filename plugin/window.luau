@@ -111,14 +111,20 @@ local function sample(cx: WindowCx)
 		end
 	end
 	local blocks: { [number]: { number } } = {}
+	local ids_ok, local_ids = pcall(tern.kv.get, "todo-proto.pane_ids")
 	local destinations: { [number]: number | string } = {}
 	local live: { [number]: boolean } = {}
 	local block_panes: { [number]: boolean } = {}
 	for _, pane in panes do
 		if type(pane) == "table" and type(pane.pane) == "number" then
-			local info = cx.session:pane(pane.pane)
 			local target: number | string = pane.pane
-			if info == nil then
+			local local_id = if ids_ok and type(local_ids) == "table" and membership[pane.pane] == 0
+				then local_ids[tostring(pane.pane % PANE_MOD)] else nil
+			if type(local_id) == "number" then
+				target = tostring(local_id)
+			end
+			local info = cx.session:pane(target)
+			if info == nil and type(target) == "number" then
 				target = tostring(pane.pane)
 				info = cx.session:pane(target)
 			end
