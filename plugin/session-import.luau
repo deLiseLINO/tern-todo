@@ -30,8 +30,7 @@ tern.block.define("session-import", {
 			state.reply = { phase = "error", error = "No source pane was provided." }
 			return state
 		end
-		-- Window Luau ids move the remote host tag to bit 44; the daemon uses only the lower pane-id bits.
-		pane = pane % 17592186044416
+		local source_key = pane % 17592186044416
 		tern.process.run({ TERN, "inspect", "--json" }, { timeout_ms = 8000 }, function(result)
 			if state.closed then
 				return
@@ -44,9 +43,12 @@ tern.block.define("session-import", {
 			local source = nil
 			if ok and type(catalog) == "table" and type(catalog.panes) == "table" then
 				for _, item in catalog.panes do
-					if item.pane == pane then
+					if item.pane % 17592186044416 == source_key then
+						if source then
+							fail(state, "This Tern version returned an ambiguous pane id. Restart Tern and run the command again.")
+							return
+						end
 						source = item
-						break
 					end
 				end
 			end
@@ -54,6 +56,7 @@ tern.block.define("session-import", {
 				fail(state, "This pane is not running omp. Focus the omp pane and run the command again.")
 				return
 			end
+			pane = source.pane
 			local file = source.omp_session_file
 			local id = string.match(file, "_([%w%-]+)%.jsonl$")
 			if not id then
