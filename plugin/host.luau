@@ -1997,6 +1997,19 @@ local function reload_if_nudged(state: State): boolean
 end
 
 local function heartbeat()
+	local ids: { [string]: number } = {}
+	local ambiguous: { [string]: boolean } = {}
+	for _, pane in tern.pane.list() do
+		local key = tostring(pane.pane % 17592186044416)
+		if ids[key] ~= nil then
+			ambiguous[key] = true
+		end
+		ids[key] = pane.pane
+	end
+	for key in ambiguous do
+		ids[key] = nil
+	end
+	pcall(tern.kv.set, "todo-proto.pane_ids", ids)
 	pcall(tern.kv.set, "watch", os.time())
 end
 
