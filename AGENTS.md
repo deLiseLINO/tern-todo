@@ -14,6 +14,7 @@ Use `deLiseLINO <52623978+deLiseLINO@users.noreply.github.com>` for commits and 
 Write commit messages, pull request titles, descriptions, and GitHub comments in English. Titles use `type(scope): subject`, with an imperative subject and no trailing period. Reply to the user in Russian.
 After each task that changes this repository, open a ready pull request into `main` using the poteto `opening-a-pr` playbook. Use the sections `## Why`, `## Scope`, `## Blast Radius`, and `## Verification`. Report only verification that actually ran.
 Merge with `gh pr merge <number> --repo deLiseLINO/tern-todo --squash --auto`. After the merge, update the primary tern-todo checkout from `origin/main` without discarding local changes, then remove the task worktree.
+Take every UI screenshot for a pull request in the dark theme. In an isolated live Tern window `appearance dark` has no effect, so run `tern ctl --control EP theme light '"dark-github"'`. Crop to the changed card. Commit the images to a separate `pr-assets-*` branch, not to the pull request branch, and link them by commit SHA.
 
 ## Parent repository
 
