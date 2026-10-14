@@ -214,7 +214,7 @@ Existing `done_group` values from the older `todo-proto.settings` store migrate 
 | Show agent status on rows | on | no Working / Needs you / Ready for you / Stopped line under the title (the card chip stays) |
 | Show key hints | on | no shortcut line at the bottom of the block |
 | Done tasks as a separate group | off | done tasks stay in the main list. When on, done tasks leave the main list and sit under a collapsed `Done (N)` header, above the Archived header. Click the header to expand it. Keyboard navigation and selection only see the done rows while the group is expanded. |
-| Task titles from omp | off | task titles stay as you typed them. When on, the 10 s scan (see "Automatic import") copies the title omp gave a session onto the task linked to it, even if you named the task yourself. A title you typed then works as the first prompt: it is sent to omp when you start the task, and omp's name replaces it afterwards. A renamed task is overwritten again at the next scan while omp's title differs. A session without an omp title leaves the task title alone. The scan runs only while a Todos block is open. |
+| Task titles from omp | off | default for the per-task "Auto title" switch, which appears on the detail card of a task linked to an omp session. A task without its own switch value follows this setting. When a task is on, the 10 s scan (see "Automatic import") copies the title omp gave its session onto the task. Renaming a task by hand turns its switch off; turn it on again to let omp's title replace yours. A title you typed works as the first prompt: it is sent to omp when you start the task. A session without an omp title leaves the task title alone. The scan runs only while a Todos block is open. |
 
 ## Order model
 

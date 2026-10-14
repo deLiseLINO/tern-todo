@@ -121,7 +121,7 @@ local SETTINGS: { { id: string, label: string, hint: string, default: boolean } 
 	{ id = "status_line", label = "Show agent status on rows", hint = "Working, Needs you, Ready for you or Stopped under the title.", default = true },
 	{ id = "hints", label = "Show key hints", hint = "The line of keyboard shortcuts at the bottom of the block.", default = true },
 	{ id = "done_group", label = "Done tasks as a separate group", hint = "Collapse completed tasks into their own Done section.", default = false },
-	{ id = "omp_titles", label = "Task titles from omp", hint = "Linked tasks take the title omp gives their session; a typed title is only the prompt.", default = false },
+	{ id = "omp_titles", label = "Task titles from omp", hint = "Default for linked tasks, which take the title omp gives their session. Each task has its own switch; renaming a task turns it off.", default = false },
 }
 
 
@@ -138,6 +138,8 @@ type Todo = {
 	backlog: boolean,
 	links: Links,
 	agent: Agent,
+	-- Whether omp names the task; nil follows the omp_titles setting.
+	auto_title: boolean?,
 	-- ISO UTC stamps the block maintains (absent on tasks it has not touched yet).
 	created: string?,
 	updated: string?,
@@ -370,6 +372,7 @@ local function parse(text: string): ({ Todo }?, string?)
 					omp_session = str_or_nil(links.omp_session),
 				},
 				agent = { model = str_or_nil(agent.model), thinking = str_or_nil(agent.thinking) },
+				auto_title = if type(item.auto_title) == "boolean" then item.auto_title else nil,
 				created = str_or_nil(item.created),
 				updated = str_or_nil(item.updated),
 				completed = str_or_nil(item.completed),
@@ -2059,6 +2062,13 @@ local function cycle_priority(state: State, t: Todo)
 	end)
 end
 
+local function toggle_auto_title(state: State, t: Todo)
+	local on = if t.auto_title == nil then state.cfg.omp_titles == true else t.auto_title
+	patch(state, t.id, function(item)
+		item.auto_title = not on
+	end)
+end
+
 local function activate(state: State, t: Todo)
 	local pane = live_pane_of(t)
 	if pane then
@@ -2964,6 +2974,9 @@ local function save_field(state: State, f: Field, name: string, mode: string)
 				return false
 			end
 			item[name], f.saved = draft, draft
+			if name == "title" then
+				item.auto_title = false
+			end
 			return true
 		end
 		return false
@@ -3949,7 +3962,8 @@ local function detail_view(state: State, t: Todo): Node
 		role = ROLE .. "notes",
 		placeholder = "Add notes",
 	}, if state.focus == "notes" then state.notes else nil, t.notes)
-	local icons = el("div", "icons", "icons", nil, {
+	local auto_on = if t.auto_title == nil then state.cfg.omp_titles == true else t.auto_title
+	local icon_nodes: { Node } = {
 		click_pill("prio", PRIORITY_LABEL[t.priority], PILL_TONE[t.priority], "prio-" .. t.priority, "prio"),
 		el("button", "hbtn", "up", {
 			aria = "Move up",
@@ -3963,7 +3977,11 @@ local function detail_view(state: State, t: Todo): Node
 			attrs = { ["data-kind"] = "down", ["data-edge"] = if can_move(state, t, 1) then "false" else "true" },
 			actions = { click = "mv=down" },
 		}),
-	})
+	}
+	if t.links.omp_session then
+		table.insert(icon_nodes, 1, click_pill("autotitle", if auto_on then "Auto title: on" else "Auto title: off", if auto_on then "success" else nil, "none", "autotitle"))
+	end
+	local icons = el("div", "icons", "icons", nil, icon_nodes)
 	local agent = el("div", "agent", "agent", nil, {
 		el("div", "agent-title", "title", { text = "Hand it to an agent" }),
 		el("div", "agent-row", "pills", nil, {
@@ -4638,6 +4656,8 @@ tern.block.define("list", {
 			end
 		elseif act == "prio" and t then
 			cycle_priority(state, t)
+		elseif act == "autotitle" and t then
+			toggle_auto_title(state, t)
 		elseif act == "level" and t then
 			cycle_level(state, t)
 		elseif act == "primary" and t then

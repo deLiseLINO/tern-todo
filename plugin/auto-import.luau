@@ -51,13 +51,37 @@ local function omp_titles_on(): boolean
 	return ok and type(settings) == "table" and settings.omp_titles == true
 end
 
+local function wants_title(item: any, by_default: boolean): boolean
+	if type(item) ~= "table" or type(item.links) ~= "table" or not is_text(item.links.omp_session) then
+		return false
+	end
+	if type(item.auto_title) == "boolean" then
+		return item.auto_title
+	end
+	return by_default
+end
+
+local function any_wants_title(path: string, by_default: boolean): boolean
+	local found = false
+	edit_file(path, function(list)
+		for _, item in list do
+			if wants_title(item, by_default) then
+				found = true
+				break
+			end
+		end
+		return false
+	end)
+	return found
+end
+
 local function bump_nudge(path: string)
 	local ok, old = pcall(tern.kv.get, NUDGE_KEY)
 	local n = if ok and type(old) == "table" and type(old.n) == "number" then old.n + 1 else 1
 	pcall(tern.kv.set, NUDGE_KEY, { path = path, n = n })
 end
 
-local function sync_titles(path: string, all: { Candidate }, index: number, titles: { [string]: string })
+local function sync_titles(path: string, all: { Candidate }, index: number, titles: { [string]: string }, by_default: boolean)
 	local candidate = all[index]
 	if not candidate then
 		busy = false
@@ -68,7 +92,7 @@ local function sync_titles(path: string, all: { Candidate }, index: number, titl
 			local touched = false
 			for _, item in list do
 				local links = if type(item) == "table" then item.links else nil
-				local want = if type(links) == "table" and is_text(links.omp_session) then titles[links.omp_session] else nil
+				local want = if wants_title(item, by_default) then titles[(links :: any).omp_session] else nil
 				if want and item.title ~= want then
 					item.title = want
 					item.updated = iso_now()
@@ -90,15 +114,16 @@ local function sync_titles(path: string, all: { Candidate }, index: number, titl
 				titles[candidate.id] = title
 			end
 		end
-		sync_titles(path, all, index + 1, titles)
+		sync_titles(path, all, index + 1, titles, by_default)
 	end)
 end
 
 local function import_next(path: string, queue: { Candidate }, index: number, all: { Candidate })
 	local candidate = queue[index]
 	if not candidate then
-		if omp_titles_on() and #all > 0 then
-			sync_titles(path, all, 1, {})
+		local by_default = omp_titles_on()
+		if #all > 0 and any_wants_title(path, by_default) then
+			sync_titles(path, all, 1, {}, by_default)
 		else
 			busy = false
 		end
