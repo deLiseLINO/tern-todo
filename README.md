@@ -83,6 +83,8 @@ Task opening, manual and automatic session import, session discovery, and task w
 
 Todo resolves pane IDs reported by Tern's window APIs against the owning daemon's pane list. This preserves session import and agent status when long-running daemons allocate IDs above 2^44. Tasks keep the full daemon ID in `links.tern_pane`; the shorter window ID is used only for transport. If two live panes share the same shorter ID, import reports an error rather than linking the wrong pane.
 
+The local daemon also publishes full pane addresses through the plugin store. The window uses those addresses for status events and approval checks when Tern exposes only a compact task-block ID. Remote status events stay on the native connection to their owning host.
+
 ### Files and state
 
 The plugin creates the host-selected default or last task file if absent, then rewrites the selected JSON file when you edit tasks. It preserves unknown keys and explicit nulls during those edits. Host-side omp import can also add tasks to the last selected file.
