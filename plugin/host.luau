@@ -1816,7 +1816,7 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 			failed(if refs.status ~= 0 then refs.stderr else "The project has no main or master branch")
 			return
 		end
-		local name = "todo-" .. string.gsub(id, "[^%w%-]", "-") .. "-" .. tostring(os.time()) .. "-" .. tostring(math.random(1, 1000000000))
+		local name = "todo-" .. tostring(math.random(100000, 999999))
 		local directory = home_dir() .. "/.omp/wt/" .. name
 		local added, reason = pcall(tern.process.run, {
 			"/usr/bin/git", "-C", cwd, "worktree", "add", "-b", name, directory, base :: string,
