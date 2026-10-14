@@ -4407,10 +4407,20 @@ tern.block.define("list", {
 		if ev.ev == "action" and ev.act == "todo.states" then
 			local ok, snapshot = pcall(tern.json.decode, if type(ev.json) == "string" then ev.json else "")
 			if ok and type(snapshot) == "table" and type(snapshot.states) == "table" then
+				local native_ids: { [string]: number } = {}
+				local ambiguous: { [string]: boolean } = {}
+				for _, pane in tern.pane.list() do
+					local key = tostring(pane.pane % 17592186044416)
+					if native_ids[key] ~= nil then
+						ambiguous[key] = true
+					end
+					native_ids[key] = pane.pane
+				end
 				local states: { [string]: string } = {}
 				for key, word in snapshot.states do
-					if type(key) == "string" and type(word) == "string" then
-						states[key] = word
+					local native_id = native_ids[key]
+					if type(key) == "string" and type(word) == "string" and native_id and not ambiguous[key] then
+						states[tostring(native_id)] = word
 					end
 				end
 				state.agent_states = states

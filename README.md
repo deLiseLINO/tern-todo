@@ -81,6 +81,8 @@ Task opening, manual and automatic session import, session discovery, and task w
 - `fswatch` is optional. The plugin expects `/opt/homebrew/bin/fswatch`, installed on Apple Silicon macOS with `brew install fswatch`. It reloads a changed file within about 0.2 seconds when the watcher runs, except while a text field has focus. A 5-second file poll is the fallback.
 - Task editing, omp-session import, chat and model selection, launch and resume, and pane lifecycle run on macOS and Linux hosts with Tern plugins. Session metadata uses BSD `stat -f` on macOS and GNU `stat -c` on Linux. Windows is not supported. A Linux host uses the 5-second file poll unless `/opt/homebrew/bin/fswatch` is available.
 
+Todo resolves pane IDs reported by Tern's window APIs against the owning daemon's pane list. This preserves session import and agent status when long-running daemons allocate IDs above 2^44. Tasks keep the full daemon ID in `links.tern_pane`; the shorter window ID is used only for transport. If two live panes share the same shorter ID, import reports an error rather than linking the wrong pane.
+
 ### Files and state
 
 The plugin creates the host-selected default or last task file if absent, then rewrites the selected JSON file when you edit tasks. It preserves unknown keys and explicit nulls during those edits. Host-side omp import can also add tasks to the last selected file.

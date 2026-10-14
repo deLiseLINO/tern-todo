@@ -3,7 +3,7 @@ local busy: { [number]: boolean } = {}
 
 local function add(cx: WindowCx)
 	local source = cx.session:focused()
-	local info = if source then cx.session:pane(source) else nil
+	local info = if source then cx.session:pane("@focused") else nil
 	if not source or not info then
 		cx:toast("error", "No focused pane")
 		return

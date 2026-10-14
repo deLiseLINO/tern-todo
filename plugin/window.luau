@@ -55,14 +55,14 @@ local function has_ask(node: any): boolean
 	return false
 end
 
-local function ask_open(cx: WindowCx, pane: number): boolean
+local function ask_open(cx: WindowCx, pane: number | string): boolean
 	local ok, tree = pcall(function()
 		return cx.session:surface(pane, { as = "table", root = "e", depth = 3, nodes = 40 })
 	end)
 	return ok and type(tree) == "table" and has_ask(tree.main)
 end
 
-local function agent_state(cx: WindowCx, agent: any): string?
+local function agent_state(cx: WindowCx, agent: any, pane: number | string): string?
 	local state = agent.state
 	if state ~= "working" and state ~= "waiting_input" and state ~= "idle" and state ~= "exited" then
 		return nil
@@ -72,13 +72,13 @@ local function agent_state(cx: WindowCx, agent: any): string?
 	end
 	if state == "waiting_input" then
 		local ok, tree = pcall(function()
-			return cx.session:surface(agent.pane, { as = "table", root = "layer", depth = 1, nodes = 16 })
+			return cx.session:surface(pane, { as = "table", root = "layer", depth = 1, nodes = 16 })
 		end)
 		if ok and type(tree) == "table" and tree.surface
 			and tree.surface.role == "omp.session" and tree.main
 			and tree.main.id == "layer" and not tree.main.more
 			and (tree.main.c == nil or #tree.main.c == 0)
-			and not ask_open(cx, agent.pane) then
+			and not ask_open(cx, pane) then
 			state = if agent.busy == false then "idle" else "working"
 		end
 	end
@@ -111,18 +111,27 @@ local function sample(cx: WindowCx)
 		end
 	end
 	local blocks: { [number]: { number } } = {}
+	local destinations: { [number]: number | string } = {}
 	local live: { [number]: boolean } = {}
 	local block_panes: { [number]: boolean } = {}
 	for _, pane in panes do
 		if type(pane) == "table" and type(pane.pane) == "number" then
-			live[pane.pane] = true
-			local host = membership[pane.pane]
+			local info = cx.session:pane(pane.pane)
+			local target: number | string = pane.pane
+			if info == nil then
+				target = tostring(pane.pane)
+				info = cx.session:pane(target)
+			end
+			local id = if info then info.pane else pane.pane
+			destinations[id] = target
+			live[id] = true
+			local host = membership[id]
 			if host ~= nil and pane.block == BLOCK then
 				if blocks[host] == nil then
 					blocks[host] = {}
 				end
-				table.insert(blocks[host], pane.pane)
-				block_panes[pane.pane] = true
+				table.insert(blocks[host], id)
+				block_panes[id] = true
 			end
 		end
 	end
@@ -157,11 +166,13 @@ local function sample(cx: WindowCx)
 		local states: { [number]: string } = {}
 		local observed: { [number]: boolean } = {}
 		for _, agent in agents do
-			if type(agent) == "table" and type(agent.pane) == "number" and membership[agent.pane] == host_id then
-				observed[agent.pane] = true
-				local state = agent_state(cx, agent)
+			if type(agent) == "table" and type(agent.pane) == "number"
+				and (agent.host == host_id or (agent.host == nil and membership[agent.pane] == host_id)) then
+				local pane = (agent.pane % PANE_MOD) + host_id * PANE_MOD
+				observed[pane] = true
+				local state = agent_state(cx, agent, destinations[pane] or agent.pane)
 				if state then
-					states[agent.pane] = state
+					states[pane] = state
 				end
 			end
 		end
@@ -188,7 +199,7 @@ local function sample(cx: WindowCx)
 			local last = deliveries[pane]
 			if last == nil or last.generation ~= gen or last.signature ~= sig or now - last.sent >= KEEPALIVE_MS then
 				local sent = pcall(function()
-					cx.session:event(pane, { ev = "action", act = "todo.states", json = json })
+					cx.session:event(destinations[pane], { ev = "action", act = "todo.states", json = json })
 				end)
 				if sent then
 					deliveries[pane] = { generation = gen, signature = sig, sent = now }
@@ -231,7 +242,7 @@ tern.command({
 
 local function open_settings(cx: WindowCx)
 	local pane = cx.session:focused()
-	local info = if pane then cx.session:pane(pane) else nil
+	local info = if pane then cx.session:pane("@focused") else nil
 	if not pane or not info or info.block ~= BLOCK then
 		cx:toast("error", "Focus a Todos block first")
 		return
