@@ -175,6 +175,8 @@ The task card has a mode button to the right of the project selector, in the sam
 
 The agent status stays `Needs you` while an omp `ask` question is visible in the editor, even when the approval layer is empty.
 
+The window samples agent states in bounded slices instead of inspecting every pane in one timer callback. It resolves addresses only for Todos blocks and agent panes, then caches them until the pane address or host connection changes. A large scan keeps the last complete host state visible while it checks the remaining panes and approval surfaces. Status events continue as 4-second keepalives during the scan; the host still discards a feed after 15 seconds without an event.
+
 ## Row time
 
 Each row shows how long ago the task was last touched at the far right, right aligned with tabular numbers and muted colour. Labels are `now` under 60 seconds or in the future, `Nm`, `Nh`, `Nd` for 1-6 days, `Nw` for 7-29 days, `Nmo` for 30-364 days, and `Ny`. Every step floors. Time and row actions share a fixed trailing box, 168 px when action icons are enabled and 32 px otherwise. Hover fades out time before revealing the done, move, archive, delete and grip controls without shifting or overlapping the title. The selected row keeps its time when not hovered; an armed delete or picked-up row keeps its actions visible instead. The card and time tooltip show the same absolute local date. One minute-aligned timer refreshes the labels, with no per-row timers.
