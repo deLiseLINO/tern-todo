@@ -18,7 +18,7 @@ local function add(cx: WindowCx)
 	local host = cx.hosts:current().id
 	local pane = cx:new_block("todo-proto.session-import", { tostring(source) }, "tab", { focus = false })
 	if not pane then
-		cx:toast("error", "Session import is unavailable on this host", "Update Todo on this host with tern plugin install github.com/deLiseLINO/tern-todo/plugin --force.")
+		cx:toast("error", "Session import is unavailable on this host", "Update Todo on this host with tern plugin install github.com/deLiseLINO/tern-todo --force.")
 		return
 	end
 	busy[source] = true

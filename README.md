@@ -9,7 +9,7 @@ Install [Tern](https://docs.stencil.so/tern/) and Git on the machine that runs t
 With a Tern window open, run:
 
 ```sh
-tern plugin install github.com/deLiseLINO/tern-todo/plugin
+tern plugin install github.com/deLiseLINO/tern-todo
 tern plugin list
 ```
 
@@ -26,7 +26,7 @@ On the first launch, the plugin creates `~/todos.todo.json`. Later launches use 
 ## Update
 
 ```sh
-tern plugin install github.com/deLiseLINO/tern-todo/plugin --force
+tern plugin install github.com/deLiseLINO/tern-todo --force
 tern plugin list
 ```
 

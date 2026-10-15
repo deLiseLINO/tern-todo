@@ -173,7 +173,7 @@ if existing_package; then
     verify_runtime
     finish present 0
 fi
-install_output=$("$tern_bin" plugin install github.com/deLiseLINO/tern-todo/plugin 2>&1)
+install_output=$("$tern_bin" plugin install github.com/deLiseLINO/tern-todo 2>&1)
 install_exit=$?
 if [ -n "$install_output" ]; then
     printf '%s\n' "$install_output"
