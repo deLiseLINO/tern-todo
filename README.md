@@ -1,6 +1,6 @@
 # tern-todo
 
-![Task detail card in Tern, dark theme](https://raw.githubusercontent.com/deLiseLINO/tern-todo/4ef78a54b5d954634372f9eb9bd7c1c940939c43/shots/auto-title-dark-on.png)
+![Task list and detail card in Tern, dark theme](https://raw.githubusercontent.com/deLiseLINO/tern-todo/341b91aa29ca420e63a285d29772d490217e2672/shots/tasks-dark.png)
 
 ## Install
 
