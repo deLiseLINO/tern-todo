@@ -429,7 +429,7 @@ local function open(cx: WindowCx)
 	end
 	local host = current_host(cx)
 	if not enabled() or (host ~= nil and host.kind == "local") then
-		cx:toast("error", "Todo plugin is not ready on this host", "Install github.com/deLiseLINO/tern-todo/plugin on this host, or enable Todo: automatic installation on remote hosts.")
+		cx:toast("error", "Todo plugin is not ready on this host", "Install github.com/deLiseLINO/tern-todo on this host, or enable Todo: automatic installation on remote hosts.")
 		return
 	end
 	if host == nil then
