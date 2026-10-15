@@ -71,8 +71,6 @@ local LEVEL_LABEL: { [string]: string } = {
 	max = "Max",
 	auto = "Auto",
 }
--- Task status kinds, as Synara's TaskStatusKind; the label is the chip's text and the
--- line is the quiet word under the row's title.
 local STATUS_LABEL: { [string]: string } = {
 	starting = "Starting",
 	running = "Working",
@@ -96,7 +94,7 @@ local KIND_OF_STATE: { [string]: string } = {
 local STARTING_S = 8
 -- Rows PageUp/PageDown move in a popover.
 local PAGE_ROWS = 8
--- Longest task title, in UTF-16 units (Synara's TODO_TITLE_MAX_LENGTH).
+-- Longest task title, in UTF-16 units.
 local TITLE_MAX = 500
 -- Popovers that have a search field; the others are plain lists.
 local SEARCH: { [string]: string } = {
@@ -481,7 +479,6 @@ local function parse_iso(text: string?): number?
 	return days_from_civil(Y, M, D) * 86400 + H * 3600 + I * 60 + S - offset
 end
 
--- T3 Code / Synara row label: now, Nm, Nh, Nd, Nw, Nmo, Ny (each step floors).
 local function format_age(now: number, ts: number): string
 	local secs = now - ts
 	if secs < 60 then
@@ -3054,7 +3051,6 @@ local function sync_fresh_title(state: State)
 	end
 end
 
--- Rename: focuses the title with its whole text selected, as Synara's inline rename does.
 local function begin_rename(state: State)
 	if not selected(state) then
 		return
