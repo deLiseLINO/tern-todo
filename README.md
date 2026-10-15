@@ -4,7 +4,7 @@
 
 ## Install
 
-Install [Tern](https://docs.stencil.so/tern/) and Git on the machine that runs the Tern daemon. The plugin supports macOS and Linux.
+Install [Tern](https://docs.stencil.so/tern/) and Git on the machine that runs the Tern daemon. The plugin runs inside Tern on macOS and Linux.
 
 With a Tern window open, run:
 
