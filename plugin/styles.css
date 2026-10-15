@@ -1,5 +1,3 @@
-/* Synara-style Tasks view for the todo-proto list block. Every rule is scoped to the block's surface. */
-
 /* Match the field's font and baseline instead of the inherited terminal grid line. */
 .sf-region[data-surface='plugin.todo-proto.list'] .sf-caret {
 	height: 1em;
