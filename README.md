@@ -37,3 +37,13 @@ Task files and settings stay intact. If you previously linked a development chec
 Run the installation commands on each remote host that runs Tern. Switch the Tern window to that host, then run **Todo: open tasks**.
 
 For automatic installation on connected hosts, enable **Todo: automatic installation on remote hosts** in the local window's command palette. This installs missing copies only. Update existing copies manually.
+
+## Task controls
+
+Open Settings with the gear button, the comma key, or **Todo: settings** in the command palette.
+
+- **Groups** controls the order and display of Tasks, Backlog, Done, and Archived. Tasks stays a tab. Backlog can be a tab or section. Done can stay inline or use a section or tab. Archived can be a section, tab, or hidden. Click a group to change its mode. Shift+Up and Shift+Down change its order. Settings are shared by blocks on the same host.
+- **Open pane as a split** shows one task pane beside the Todos block. Opening another task parks the previous pane without stopping its program. Turn this setting off to open task panes in tabs.
+- Delete and Backspace require a second press. Deleting a task also closes its pane and removes its linked omp session file. Bulk deletion applies to the selected tasks. The row's delete icon turns white on red during confirmation without changing its size.
+
+Task files contain a `todos` array. File changes reload through `fswatch` when available, with a five-second polling fallback. Reload waits while a text field has focus.

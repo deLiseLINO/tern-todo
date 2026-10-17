@@ -107,6 +107,7 @@ local SEARCH: { [string]: string } = {
 -- their default). Each one gates something real below.
 local SETTINGS_KEY = "settings"
 local SETTINGS: { { id: string, label: string, hint: string, default: boolean } } = {
+	{ id = "split_pane", label = "Open pane as a split", hint = "New panes split this block's screen. Off opens them in a new tab.", default = true },
 	{ id = "time", label = "Show time on rows", hint = "How long ago a task was last touched, at the right of the row.", default = true },
 	{ id = "row_actions", label = "Show row action icons", hint = "Done, move to backlog, archive and delete buttons on hovered rows.", default = true },
 	{ id = "close_on_done", label = "Close pane on done, archive or backlog", hint = "Closes the linked pane unless the agent is busy.", default = true },
@@ -114,7 +115,6 @@ local SETTINGS: { { id: string, label: string, hint: string, default: boolean } 
 	{ id = "focus_on_start", label = "Open pane when a task starts", hint = "Switch to the new tab right away. Off opens it in the background.", default = true },
 	{ id = "new_chat_worktree", label = "Create new chats in a worktree", hint = "Start new chats in a separate Git worktree. Existing chats keep their directory.", default = true },
 	{ id = "dblclick", label = "Double-click opens pane", hint = "Double-click does what Enter does: focus, resume or start.", default = true },
-	{ id = "archived", label = "Show archived section", hint = "The Archived list below the tasks.", default = true },
 	{ id = "badges", label = "Show badges on rows", hint = "Priority, pane and omp chips under the title.", default = true },
 	{ id = "status_line", label = "Show agent status on rows", hint = "Working, Needs you, Ready for you or Stopped under the title.", default = true },
 	{ id = "hints", label = "Show key hints", hint = "The line of keyboard shortcuts at the bottom of the block.", default = true },
@@ -162,6 +162,10 @@ type Pick = {
 	hint: string?,
 }
 
+-- How the groups are laid out: `order` lists "tasks", "backlog", "done", "archived" once each
+-- (tab order, and section order under Tasks); `mode` is a display mode per group.
+type Groups = { order: { string }, mode: { [string]: string } }
+
 type State = {
 	cx: BlockCx,
 	path: string?,
@@ -204,11 +208,10 @@ type State = {
 	-- When a pane was last seen working / launched by this block (os.time()).
 	since: { [number]: number },
 	launched: { [number]: number },
-	-- Archived section expanded; id of the task whose Delete awaits its second press (view
-	-- state only, never saved to the file).
-	arch_open: boolean,
-	-- Whether the optional Done section is expanded, kept only in this block.
-	done_open: boolean,
+	-- Section groups currently expanded, by group id (view state only, never saved).
+	open_sections: { [string]: boolean },
+	-- Group order and display modes (kept in tern.kv "groups").
+	groups: Groups,
 	tab: string,
 	confirm: string?,
 	confirm_timer: TimerHandle?,
@@ -218,6 +221,8 @@ type State = {
 	tap: { key: string, at: number }?,
 	-- Tasks whose `tern new tab` is still running, so a repeated double click starts one tab.
 	launching: { [string]: boolean },
+	-- The pane currently shown beside the block in split mode.
+	slot: number?,
 	-- Multi-selection (view state only, never saved): the ticked ids, the row a shift range
 	-- starts at, whether Delete awaits its second press for the whole selection, and the
 	-- tasks whose done toggle (pane close) is in flight.
@@ -230,6 +235,7 @@ type State = {
 	-- (mtime, seconds) with their paths and the last lookup try per session id.
 	cfg: { [string]: boolean },
 	settings_open: boolean,
+	settings_page: string,
 	settings_sel: number,
 	settings_tap: { id: string, at: number }?,
 	sess_mtime: { [string]: number },
@@ -301,32 +307,136 @@ local function live_panes(): { [number]: boolean }
 	return set
 end
 
--- Open todos first, then done ones, file order inside each group; archived ones last, and
--- only while the Archived section is expanded. The Backlog tab lists only backlog tasks, the
--- Tasks tab everything else; an archived task is never in the backlog. `with_done` is false
--- while done tasks sit in a collapsed Done group.
-local function in_backlog(t: Todo): boolean
-	return t.backlog and not t.archived
+-- Group model and its actions, in one table: the file is near Luau's limit of 200 top-level
+-- locals.
+local GR = {}
+GR.IDS = { "tasks", "backlog", "done", "archived" } :: { string }
+GR.TITLE = { tasks = "Tasks", backlog = "Backlog", done = "Done", archived = "Archived" } :: { [string]: string }
+-- The display modes a group can take; the first is the default. "tab": its own tab.
+-- "section": a collapsible header under the Tasks list. "inline" (Done only): done tasks stay
+-- in their own list, below the open ones. "hidden" (Archived only): not listed anywhere.
+-- Tasks is always a tab.
+GR.MODES = {
+	backlog = { "tab", "section" },
+	done = { "inline", "section", "tab" },
+	archived = { "section", "tab", "hidden" },
+} :: { [string]: { string } }
+GR.LABEL = { tab = "Tab", section = "Section", inline = "Inline", hidden = "Hidden" } :: { [string]: string }
+GR.HINT = {
+	tab = "Shown as its own tab.",
+	section = "Shown as a collapsible group under Tasks.",
+	inline = "Done tasks stay in their list, below the open ones.",
+	hidden = "Not shown.",
+} :: { [string]: string }
+GR.KEY = "groups"
+
+function GR.default(): Groups
+	local mode: { [string]: string } = {}
+	for g, modes in GR.MODES do
+		mode[g] = modes[1]
+	end
+	return { order = table.clone(GR.IDS), mode = mode }
 end
 
-local function ordered(todos: { Todo }, tab: string, with_archived: boolean, with_done: boolean): { Todo }
-	local want = tab == "backlog"
-	local out: { Todo } = {}
-	for _, t in todos do
-		if not t.done and not t.archived and in_backlog(t) == want then
-			table.insert(out, t)
+-- Groups live in tern.kv "groups", shared by every Todos block. Before the first save the
+-- former switches in "settings" decide: done_group on is Done as a section, archived off is
+-- Archived hidden.
+function GR.read(): Groups
+	local groups = GR.default()
+	local ok, v = pcall(tern.kv.get, GR.KEY)
+	if not ok or type(v) ~= "table" then
+		local cok, cfg = pcall(tern.kv.get, SETTINGS_KEY)
+		if cok and type(cfg) == "table" then
+			if cfg.done_group == true then
+				groups.mode.done = "section"
+			end
+			if cfg.archived == false then
+				groups.mode.archived = "hidden"
+			end
+		end
+		return groups
+	end
+	local saved = v.order
+	if type(saved) == "table" and #saved == #GR.IDS then
+		local seen: { [string]: boolean } = {}
+		local valid = true
+		for _, g in saved do
+			if GR.TITLE[g] == nil or seen[g] then
+				valid = false
+			else
+				seen[g] = true
+			end
+		end
+		if valid then
+			local copy: { string } = {}
+			for _, g in saved do
+				table.insert(copy, g)
+			end
+			groups.order = copy
 		end
 	end
-	if with_done then
-		for _, t in todos do
-			if t.done and not t.archived and in_backlog(t) == want then
-				table.insert(out, t)
+	local modes = v.modes
+	if type(modes) == "table" then
+		for g, allowed in GR.MODES do
+			local m = modes[g]
+			if m ~= nil and table.find(allowed, m) then
+				groups.mode[g] = m
 			end
 		end
 	end
-	if with_archived and not want then
+	return groups
+end
+
+function GR.save(groups: Groups)
+	pcall(tern.kv.set, GR.KEY, { order = groups.order, modes = groups.mode })
+end
+
+function GR.is_tab(groups: Groups, g: string): boolean
+	return g == "tasks" or groups.mode[g] == "tab"
+end
+
+function GR.is_section(groups: Groups, g: string): boolean
+	return g ~= "tasks" and groups.mode[g] == "section"
+end
+
+-- The group a task belongs to. Archived wins, then Done (unless done tasks stay inline),
+-- then Backlog, else Tasks. A task is in exactly one group.
+function GR.name(t: any, groups: Groups): string
+	if t.archived == true then
+		return "archived"
+	elseif t.done == true and groups.mode.done ~= "inline" then
+		return "done"
+	elseif t.backlog == true then
+		return "backlog"
+	end
+	return "tasks"
+end
+
+-- Where a task is listed, as a number that grows with display order. Tasks and Backlog list
+-- their inline done tasks after the open ones, so those are a bucket of their own. Moving a
+-- task onto a row of another bucket sends it to the near edge of its own bucket.
+function GR.rank(item: any, groups: Groups): number
+	if type(item) ~= "table" then
+		return 0
+	end
+	local g = GR.name(item, groups)
+	local split = (g == "tasks" or g == "backlog") and item.done == true
+	return (table.find(groups.order, g) or 0) * 2 + (if split then 1 else 0)
+end
+
+-- The tasks of group `g` in list order: open ones first, then inline done ones, file order
+-- inside each.
+function GR.rows(todos: { Todo }, g: string, groups: Groups): { Todo }
+	local out: { Todo } = {}
+	local split = g == "tasks" or g == "backlog"
+	for _, t in todos do
+		if GR.name(t, groups) == g and not (split and t.done) then
+			table.insert(out, t)
+		end
+	end
+	if split then
 		for _, t in todos do
-			if t.archived then
+			if GR.name(t, groups) == g and t.done then
 				table.insert(out, t)
 			end
 		end
@@ -334,8 +444,56 @@ local function ordered(todos: { Todo }, tab: string, with_archived: boolean, wit
 	return out
 end
 
+function GR.count(state: State, g: string): number
+	local n = 0
+	for _, t in state.todos do
+		if GR.name(t, state.groups) == g and t.id ~= state.fresh then
+			n += 1
+		end
+	end
+	return n
+end
+
+function GR.open(state: State, g: string): number
+	local n = 0
+	for _, t in state.todos do
+		if not t.done and GR.name(t, state.groups) == g and t.id ~= state.fresh then
+			n += 1
+		end
+	end
+	return n
+end
+
+-- GR.rows without the draft task (see is_draft).
+function GR.shown(state: State, g: string): { Todo }
+	local out: { Todo } = {}
+	for _, t in GR.rows(state.todos, g, state.groups) do
+		if t.id ~= state.fresh then
+			table.insert(out, t)
+		end
+	end
+	return out
+end
+
+-- What j/k and selection see: the current tab's tasks, and on the Tasks tab the expanded
+-- sections after them in group order.
 local function listed(state: State): { Todo }
-	return ordered(state.todos, state.tab, state.arch_open and state.cfg.archived, not state.cfg.done_group or state.done_open)
+	local out = GR.shown(state, state.tab)
+	if state.tab == "tasks" then
+		for _, g in state.groups.order do
+			if GR.is_section(state.groups, g) and state.open_sections[g] then
+				for _, t in GR.shown(state, g) do
+					table.insert(out, t)
+				end
+			end
+		end
+	end
+	return out
+end
+
+-- The task created by Tab stays out of the list until Enter accepts its title.
+local function is_draft(state: State, t: Todo): boolean
+	return t.id == state.fresh
 end
 
 local function str_or_nil(v: any): string?
@@ -596,12 +754,6 @@ end
 
 -- What a settings change implies for the view state.
 local function apply_settings(state: State)
-	if not state.cfg.done_group then
-		state.done_open = false
-	end
-	if not state.cfg.archived then
-		state.arch_open = false
-	end
 	ensure_cursor(state)
 	prune_sel(state)
 end
@@ -836,6 +988,9 @@ local function add_task(state: State, title: string)
 	end)
 	if written then
 		state.fresh = nil
+		if state.tab ~= "tasks" and state.tab ~= "backlog" then
+			state.tab = "tasks"
+		end
 		state.cursor = new_id
 		state.sel = {}
 		state.anchor = nil
@@ -1076,6 +1231,51 @@ local function archive_toggle(state: State, t: Todo)
 	bulk_archive(state, if #ids >= 2 then ids else { t.id })
 end
 
+type Doomed = { sessions: { string }, panes: { number } }
+
+local cleanup_removed: (State, Doomed) -> ()
+
+local function collect_links(item: any, out: Doomed)
+	local links = item.links
+	if type(links) ~= "table" then
+		return
+	end
+	if type(links.omp_session) == "string" and links.omp_session ~= "" then
+		table.insert(out.sessions, links.omp_session)
+	end
+	local pane = tonumber(links.tern_pane)
+	if pane then
+		table.insert(out.panes, pane)
+	end
+end
+
+-- Keeps sessions and panes that a remaining task still links.
+local function drop_shared_links(list: { any }, out: Doomed)
+	local used_sessions: { [string]: boolean } = {}
+	local used_panes: { [number]: boolean } = {}
+	for _, item in list do
+		if type(item) == "table" and type(item.links) == "table" then
+			if type(item.links.omp_session) == "string" then
+				used_sessions[item.links.omp_session] = true
+			end
+			local pane = tonumber(item.links.tern_pane)
+			if pane then
+				used_panes[pane] = true
+			end
+		end
+	end
+	for i = #out.sessions, 1, -1 do
+		if used_sessions[out.sessions[i]] then
+			table.remove(out.sessions, i)
+		end
+	end
+	for i = #out.panes, 1, -1 do
+		if used_panes[out.panes[i]] then
+			table.remove(out.panes, i)
+		end
+	end
+end
+
 -- First press arms the confirmation on the task's own button, the second removes the record.
 local function delete_one(state: State, t: Todo)
 	if state.confirm ~= t.id then
@@ -1092,27 +1292,24 @@ local function delete_one(state: State, t: Todo)
 	end
 	local after = neighbour(state, t.id)
 	clear_confirm(state)
-	local removed_session: string? = nil
+	local doomed: Doomed = { sessions = {}, panes = {} }
 	local written = rewrite(state, function(list)
 		for i, item in list do
 			if type(item) == "table" and item.id == t.id then
-				if type(item.links) == "table" and type(item.links.omp_session) == "string" then
-					removed_session = item.links.omp_session
-				end
+				collect_links(item, doomed)
 				table.remove(list, i)
 				break
 			end
 		end
+		drop_shared_links(list, doomed)
 	end)
 	if written then
-		if removed_session then
-			auto_import.suppress(removed_session)
-		end
+		cleanup_removed(state, doomed)
 		state.cursor = after
 	end
 end
 
--- First press arms the confirmation, the second removes the record (never a pane or session).
+-- First press arms the confirmation, the second removes the records and their omp sessions.
 local function delete_press(state: State)
 	local ids = multi_ids(state)
 	if #ids >= 2 then
@@ -1134,22 +1331,19 @@ local function delete_press(state: State)
 		end
 		local after = survivor(state, set)
 		clear_confirm(state)
-		local removed_sessions: { string } = {}
+		local doomed: Doomed = { sessions = {}, panes = {} }
 		local written = rewrite(state, function(list)
 			for i = #list, 1, -1 do
 				local item = list[i]
 				if type(item) == "table" and set[item.id] then
-					if type(item.links) == "table" and type(item.links.omp_session) == "string" then
-						table.insert(removed_sessions, item.links.omp_session)
-					end
+					collect_links(item, doomed)
 					table.remove(list, i)
 				end
 			end
+			drop_shared_links(list, doomed)
 		end)
 		if written then
-			for _, session_id in removed_sessions do
-				auto_import.suppress(session_id)
-			end
+			cleanup_removed(state, doomed)
 			state.sel = {}
 			state.anchor = nil
 			state.cursor = after or state.cursor
@@ -1165,23 +1359,15 @@ local function delete_press(state: State)
 	delete_one(state, t)
 end
 
-local function toggle_archived(state: State)
-	if not state.cfg.archived then
+function GR.toggle_section(state: State, g: string)
+	if not GR.is_section(state.groups, g) then
 		return
 	end
-	state.arch_open = not state.arch_open
+	state.open_sections[g] = not state.open_sections[g]
 	clear_confirm(state)
 	ensure_cursor(state)
 	prune_sel(state)
 end
-
-local function toggle_done_open(state: State)
-	state.done_open = not state.done_open
-	clear_confirm(state)
-	ensure_cursor(state)
-	prune_sel(state)
-end
-
 
 local function switch_tab(state: State, tab: string)
 	if state.tab == tab then
@@ -1192,6 +1378,56 @@ local function switch_tab(state: State, tab: string)
 	clear_sel(state)
 	state.anchor = nil
 	ensure_cursor(state)
+end
+
+-- B and Z: a group shown as a tab opens its tab (a second press returns to Tasks); a group
+-- shown as a section expands or collapses under Tasks; a hidden group does nothing.
+function GR.reveal(state: State, g: string)
+	if GR.is_tab(state.groups, g) then
+		switch_tab(state, if state.tab == g then "tasks" else g)
+	elseif GR.is_section(state.groups, g) then
+		switch_tab(state, "tasks")
+		GR.toggle_section(state, g)
+	end
+end
+
+-- Saves a changed group order or mode and repairs the view: the open tab may have turned
+-- into a section, and a task picked up for a move may no longer be listed.
+function GR.apply(state: State)
+	GR.save(state.groups)
+	if not GR.is_tab(state.groups, state.tab) then
+		state.tab = "tasks"
+		clear_sel(state)
+		state.anchor = nil
+	end
+	state.lift = nil
+	clear_confirm(state)
+	ensure_cursor(state)
+	prune_sel(state)
+end
+
+function GR.move(state: State, g: string, delta: number)
+	local order = state.groups.order
+	local i = table.find(order, g)
+	if i == nil then
+		return
+	end
+	local j = i + delta
+	if j >= 1 and j <= #order then
+		order[i], order[j] = order[j], order[i]
+		GR.apply(state)
+	end
+end
+
+-- Steps a group to its next display mode (see GR.MODES).
+function GR.cycle(state: State, g: string)
+	local modes = GR.MODES[g]
+	local at = if modes then table.find(modes, state.groups.mode[g]) else nil
+	if modes == nil or at == nil then
+		return
+	end
+	state.groups.mode[g] = modes[at % #modes + 1]
+	GR.apply(state)
 end
 
 -- Moves tasks between the Tasks list and the Backlog; archived tasks stay where they are.
@@ -1265,25 +1501,12 @@ end
 
 -- Reorder -------------------------------------------------------------------
 
--- The group a task is listed in: 1 open, 2 done, 3 archived (the order of `ordered`).
-local function group_of(item: any): number
-	if type(item) ~= "table" then
-		return 0
-	end
-	if item.archived == true then
-		return 3
-	elseif item.done == true then
-		return 2
-	end
-	return 1
-end
-
 -- Moves the item `id` of `list` (the file's todos array) onto `target`: within one group it
 -- takes the target's place (before it when moving up, after it when moving down). A target
 -- of another group puts it at the near edge of its own group instead (after the last item
 -- when the target's group is listed later, before the first when earlier). Only the array
 -- order changes. Returns whether the order changed.
-local function place(list: { any }, id: string, target: string): boolean
+local function place(list: { any }, id: string, target: string, groups: Groups): boolean
 	local from, to = 0, 0
 	for i, item in list do
 		if type(item) == "table" then
@@ -1297,7 +1520,7 @@ local function place(list: { any }, id: string, target: string): boolean
 	if from == 0 or to == 0 then
 		return false
 	end
-	local g, tg = group_of(list[from]), group_of(list[to])
+	local g, tg = GR.rank(list[from], groups), GR.rank(list[to], groups)
 	local item = table.remove(list, from)
 	local at = from
 	if g == tg then
@@ -1305,7 +1528,7 @@ local function place(list: { any }, id: string, target: string): boolean
 	else
 		local first, last = 0, 0
 		for i, other in list do
-			if group_of(other) == g then
+			if GR.rank(other, groups) == g then
 				if first == 0 then
 					first = i
 				end
@@ -1324,18 +1547,18 @@ end
 -- writer's changes survive. A move that would change nothing writes nothing.
 local function reorder(state: State, id: string, target: string): boolean
 	local probe = table.clone(state.todos) :: { any }
-	if not place(probe, id, target) then
+	if not place(probe, id, target, state.groups) then
 		return false
 	end
 	return rewrite(state, function(list)
-		place(list, id, target)
+		place(list, id, target, state.groups)
 	end)
 end
 
 -- The neighbour `delta` places away in the same group, if there is one (a group's edge stops).
 local function neighbour_in_group(state: State, t: Todo, delta: number): Todo?
 	local other = listed(state)[index_of(state) + delta]
-	if other and group_of(other) == group_of(t) then
+	if other and GR.rank(other, state.groups) == GR.rank(t, state.groups) then
 		return other
 	end
 	return nil
@@ -1462,6 +1685,47 @@ end
 
 local function sessions_root(): string
 	return home_dir() .. "/.omp/agent/sessions"
+end
+
+-- Closes the panes of removed tasks and deletes their session files (`find -delete`, no shell).
+cleanup_removed = function(state: State, doomed: Doomed)
+	for _, id in doomed.sessions do
+		auto_import.suppress(id)
+	end
+	local live = live_panes()
+	for _, pane in doomed.panes do
+		if live[pane] then
+			pcall(tern.process.run, { TERN, "close", tostring(pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+				if alive(state) and result.status ~= 0 then
+					state.cx:toast("error", "tern close failed", result.stderr)
+				end
+			end)
+		end
+	end
+	local ids = doomed.sessions
+	local argv = { "/usr/bin/find", sessions_root(), "-maxdepth", "2", "(" }
+	local n = 0
+	for _, id in ids do
+		if string.match(id, "^[%w%-]+$") then
+			if n > 0 then
+				table.insert(argv, "-o")
+			end
+			table.insert(argv, "-name")
+			table.insert(argv, "*_" .. id .. ".jsonl")
+			n += 1
+		end
+	end
+	if n == 0 then
+		return
+	end
+	for _, a in { ")", "-delete" } do
+		table.insert(argv, a)
+	end
+	pcall(tern.process.run, argv, { timeout_ms = 8000 }, function(result: ProcessResult, _)
+		if alive(state) and result.status ~= 0 then
+			state.cx:toast("error", "Cannot delete omp session", result.stderr)
+		end
+	end)
 end
 
 -- omp's session bucket directory for a cwd (see omp docs, session.md "On-disk layout").
@@ -1718,7 +1982,9 @@ local function discover_session(state: State, task_id: string, pane: number, dea
 	end)
 end
 
-local function pane_from(stdout: string): number?
+local PANES = {}
+
+function PANES.from(stdout: string): number?
 	local ok, data = pcall(tern.json.decode, stdout)
 	if ok and type(data) == "table" then
 		for _, k in { "pane", "block", "id" } do
@@ -1731,6 +1997,47 @@ local function pane_from(stdout: string): number?
 	return tonumber(string.match(stdout, "%d+"))
 end
 
+-- Asks the window half (window.luau) to park `park` and deal `show` beside the focused block,
+-- then calls `after(true)`; `after(false)` when it failed or did not answer within 2 s.
+function PANES.relay(park: number?, show: number?, after: (boolean) -> ())
+	local rok, old = pcall(tern.kv.get, "pane_req")
+	local n = if rok and type(old) == "table" and type(old.n) == "number" then old.n + 1 else 1
+	if not pcall(tern.kv.set, "pane_req", { n = n, park = park, show = show }) then
+		after(false)
+		return
+	end
+	local tries = 0
+	local function poll()
+		local ok, ack = pcall(tern.kv.get, "pane_ack")
+		if ok and type(ack) == "table" and ack.n == n then
+			after(ack.ok == true)
+			return
+		end
+		tries += 1
+		if tries >= 20 then
+			after(false)
+			return
+		end
+		tern.timer(100, poll)
+	end
+	tern.timer(100, poll)
+end
+
+-- Split mode shows one task pane beside the block. Parks the previous one (its program keeps
+-- running) and, when `show` is given, deals it beside the block; `after(ok)` follows.
+function PANES.swap(state: State, show: number?, after: (boolean) -> ())
+	local old = state.slot
+	if old == show or (old and not live_panes()[old]) then
+		old = nil
+	end
+	PANES.relay(old, show, function(ok)
+		if ok or old == nil then
+			state.slot = show
+		end
+		after(ok)
+	end)
+end
+
 -- Opens a new Tern tab in the task's project running `argv` (one argv element each, no
 -- shell) and links the new pane to the task.
 local function launch(state: State, t: Todo, argv: { string }, find_session: boolean)
@@ -1741,10 +2048,13 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 	local id = t.id
 	state.launching[id] = true
 	local function open_tab(directory: string)
-		local cmd = { TERN, "new", "tab", "--json", "--cwd", directory, "--" }
+		local cmd = if state.cfg.split_pane
+			then { TERN, "split", tostring(state.cx.pane), "right", "--json", "--cwd", directory, "--" }
+			else { TERN, "new", "tab", "--json", "--cwd", directory, "--" }
 		for _, a in argv do
 			table.insert(cmd, a)
 		end
+		local function run()
 		local ok, err = pcall(tern.process.run, cmd, { timeout_ms = 10000 }, function(result: ProcessResult, _)
 			state.launching[id] = nil
 			if result.status ~= 0 then
@@ -1752,13 +2062,16 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 				state.cx:toast("error", "tern new tab failed", first)
 				return
 			end
-			local pane = pane_from(result.stdout)
+			local pane = PANES.from(result.stdout)
 			if not pane then
 				state.cx:toast("error", "tern new tab gave no pane id", result.stdout)
 				return
 			end
 			if not alive(state) then
 				return
+			end
+			if state.cfg.split_pane then
+				state.slot = pane
 			end
 			if state.cfg.focus_on_start then
 				-- `tern new tab` leaves the new tab in the background: show it.
@@ -1785,6 +2098,12 @@ local function launch(state: State, t: Todo, argv: { string }, find_session: boo
 		if not ok then
 			state.launching[id] = nil
 			state.cx:toast("error", "Cannot run tern", tostring(err))
+		end
+		end
+		if state.cfg.split_pane then
+			PANES.swap(state, nil, function(_) run() end)
+		else
+			run()
 		end
 	end
 	if not find_session or not state.cfg.new_chat_worktree then
@@ -2069,15 +2388,42 @@ end
 local function activate(state: State, t: Todo)
 	local pane = live_pane_of(t)
 	if pane then
-		local ok, err = pcall(function()
-			tern.process.run({ TERN, "focus", tostring(pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
-				if result.status ~= 0 then
-					state.cx:toast("error", "tern focus failed", result.stderr)
+		local function focus_it()
+			local ok, err = pcall(function()
+				tern.process.run({ TERN, "focus", tostring(pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+					if result.status ~= 0 then
+						state.cx:toast("error", "tern focus failed", result.stderr)
+					end
+				end)
+			end)
+			if not ok then
+				state.cx:toast("error", "Cannot run tern", tostring(err))
+			end
+		end
+		if state.cfg.split_pane and pane ~= state.cx.pane then
+			if state.slot == pane then
+				focus_it()
+				return
+			end
+			PANES.swap(state, pane, function(ok)
+				if ok then
+					focus_it()
+					return
+				end
+				-- Not in the park pile (it lives in a tab): move it beside the block instead.
+				state.slot = pane
+				local mok, merr = pcall(tern.process.run, { TERN, "move", tostring(pane), "right-of", tostring(state.cx.pane) }, { timeout_ms = 5000 }, function(result: ProcessResult, _)
+					if result.status ~= 0 then
+						state.cx:toast("error", "tern move failed", result.stderr)
+					end
+					focus_it()
+				end)
+				if not mok then
+					state.cx:toast("error", "Cannot run tern", tostring(merr))
 				end
 			end)
-		end)
-		if not ok then
-			state.cx:toast("error", "Cannot run tern", tostring(err))
+		else
+			focus_it()
 		end
 	elseif t.links.omp_session then
 		launch(state, t, { omp_bin(), "--resume", t.links.omp_session }, false)
@@ -3301,6 +3647,7 @@ end
 open_settings = function(state: State)
 	state.pick = nil
 	state.settings_sel = 1
+	state.settings_page = "main"
 	if state.focus then
 		set_focus(state, nil)
 	end
@@ -3513,47 +3860,6 @@ local function field_node(kind: string, props: { [string]: any }, f: Field?, idl
 	return ui.node(kind, props)
 end
 
-local function open_count(state: State): number
-	local want = state.tab == "backlog"
-	local open = 0
-	for _, t in state.todos do
-		if not t.done and not t.archived and in_backlog(t) == want then
-			open += 1
-		end
-	end
-	return open
-end
-
-local function tab_count(state: State): number
-	local want = state.tab == "backlog"
-	local n = 0
-	for _, t in state.todos do
-		if not t.archived and in_backlog(t) == want then
-			n += 1
-		end
-	end
-	return n
-end
-
-local function backlog_count(state: State): number
-	local n = 0
-	for _, t in state.todos do
-		if in_backlog(t) then
-			n += 1
-		end
-	end
-	return n
-end
-
-local function archived_count(state: State): number
-	local n = 0
-	for _, t in state.todos do
-		if t.archived then
-			n += 1
-		end
-	end
-	return n
-end
 
 local function badges(t: Todo, live: { [number]: boolean }): { Node }
 	local out: { Node } = {}
@@ -3604,13 +3910,13 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 		if t.id == lifted.id then
 			mark = "pick"
 			tip = "Click to put it down where it was"
-		elseif group_of(t) == group_of(lifted) then
+		elseif GR.rank(t, state.groups) == GR.rank(lifted, state.groups) then
 			drop = if (pos[t.id] or 0) < (pos[lifted.id] or 0) then "before" else "after"
 			tip = "Move here"
 		else
 			drop = "edge"
 			mark = "drop"
-			tip = if group_of(t) > group_of(lifted) then "Move to the end of its group" else "Move to the start of its group"
+			tip = if GR.rank(t, state.groups) > GR.rank(lifted, state.groups) then "Move to the end of its group" else "Move to the start of its group"
 		end
 	end
 	local grip = el("button", "grip", "grip", {
@@ -3660,7 +3966,7 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 	-- Keyboard deletion still needs a visible second-press confirmation when icons are off.
 	if state.cfg.row_actions or armed then
 		table.insert(actions, el("button", "hbtn", "r-delete", {
-			text = if armed then "Delete?" else nil,
+			text = nil,
 			aria = if armed then "Click again to delete permanently" else "Delete",
 			title = if armed then "Click again to delete permanently" else "Delete",
 			attrs = { ["data-kind"] = "delete", ["data-row"] = "true", ["data-confirm"] = if armed then "true" else "false" },
@@ -3690,17 +3996,6 @@ local function row_view(state: State, t: Todo, live: { [number]: boolean }, lift
 	}, kids)
 end
 
-local function done_count(state: State): number
-	local want = state.tab == "backlog"
-	local n = 0
-	for _, t in state.todos do
-		if t.done and not t.archived and in_backlog(t) == want then
-			n += 1
-		end
-	end
-	return n
-end
-
 local function gear_button(): Node
 	return el("button", "gear", "gear", {
 		aria = "Settings",
@@ -3711,35 +4006,43 @@ end
 
 
 local function left_view(state: State): Node
-	local open = open_count(state)
-	local archived = archived_count(state)
-	local in_tab = tab_count(state)
-	local backlog_tab = state.tab == "backlog"
-	local subtitle = if in_tab == 0
-		then (if backlog_tab then "Backlog is empty" elseif archived > 0 then "All archived" else "No tasks yet")
+	local groups = state.groups
+	local cur = state.tab
+	local members = GR.shown(state, cur)
+	local open = GR.open(state, cur)
+	local others = 0
+	for _, g in groups.order do
+		if GR.is_section(groups, g) then
+			others += GR.count(state, g)
+		end
+	end
+	local subtitle = if #members == 0
+		then (if cur ~= "tasks" then GR.TITLE[cur] .. " is empty" elseif others > 0 then "Nothing open" else "No tasks yet")
+		elseif cur == "done" or cur == "archived" then #members .. " " .. string.lower(GR.TITLE[cur])
 		elseif open > 0 then open .. " open"
 		else "All done"
 	local picked_n = #multi_ids(state)
 	if picked_n >= 2 then
 		subtitle ..= " · " .. picked_n .. " selected"
 	end
-	local tabs = el("div", "tabs", "tabs", nil, {
-		el("button", "tabbtn", "tab-tasks", {
-			text = "Tasks",
-			attrs = { ["data-active"] = if backlog_tab then "false" else "true" },
-			actions = { click = "tab=tasks" },
-		}),
-		el("button", "tabbtn", "tab-backlog", {
-			text = "Backlog (" .. backlog_count(state) .. ")",
-			attrs = { ["data-active"] = if backlog_tab then "true" else "false" },
-			actions = { click = "tab=backlog" },
-		}),
-	})
-	local head = el("div", "head", "head", nil, {
-		el("div", "heading", "heading", { text = if backlog_tab then "Backlog" else "Tasks" }),
+	local tab_nodes: { Node } = {}
+	for _, g in groups.order do
+		if GR.is_tab(groups, g) then
+			table.insert(tab_nodes, el("button", "tabbtn", "tab-" .. g, {
+				text = if g == "tasks" then "Tasks" else GR.TITLE[g] .. " (" .. GR.count(state, g) .. ")",
+				attrs = { ["data-active"] = if cur == g then "true" else "false" },
+				actions = { click = "tab=" .. g },
+			}))
+		end
+	end
+	local head_kids: { Node } = {
+		el("div", "heading", "heading", { text = GR.TITLE[cur] }),
 		el("div", "subtitle", "subtitle", { text = subtitle }),
-		tabs,
-	})
+	}
+	if #tab_nodes > 1 then
+		table.insert(head_kids, el("div", "tabs", "tabs", nil, tab_nodes))
+	end
+	local head = el("div", "head", "head", nil, head_kids)
 	local input = field_node("input", {
 		key = "field",
 		role = ROLE .. "input",
@@ -3751,8 +4054,10 @@ local function left_view(state: State): Node
 	})
 	local live = live_panes()
 	local pos: { [string]: number } = {}
-	for i, t in ordered(state.todos, state.tab, true, true) do
-		pos[t.id] = i
+	for _, g in GR.IDS do
+		for i, t in GR.rows(state.todos, g, groups) do
+			pos[t.id] = i
+		end
 	end
 	local lifted: Todo? = nil
 	for _, t in state.todos do
@@ -3761,34 +4066,23 @@ local function left_view(state: State): Node
 		end
 	end
 	local rows: { Node } = {}
-	for _, t in ordered(state.todos, state.tab, false, not state.cfg.done_group) do
+	for _, t in members do
 		table.insert(rows, row_view(state, t, live, lifted, pos))
 	end
-	local done_n = done_count(state)
-	if state.cfg.done_group and done_n > 0 then
-		table.insert(rows, el("button", "arch-head", "donehead", {
-			text = "Done (" .. done_n .. ")",
-			attrs = { ["data-open"] = if state.done_open then "true" else "false" },
-			actions = { click = "donehead" },
-		}))
-		if state.done_open then
-			for _, t in state.todos do
-				if t.done and not t.archived and in_backlog(t) == (state.tab == "backlog") then
-					table.insert(rows, row_view(state, t, live, lifted, pos))
-				end
-			end
-		end
-	end
-	if archived > 0 and state.tab == "tasks" and state.cfg.archived then
-		table.insert(rows, el("button", "arch-head", "arch", {
-			text = "Archived (" .. archived .. ")",
-			attrs = { ["data-open"] = if state.arch_open then "true" else "false" },
-			actions = { click = "arch" },
-		}))
-		if state.arch_open then
-			for _, t in state.todos do
-				if t.archived then
-					table.insert(rows, row_view(state, t, live, lifted, pos))
+	if cur == "tasks" then
+		for _, g in groups.order do
+			local n = if GR.is_section(groups, g) then GR.count(state, g) else 0
+			if n > 0 then
+				local expanded = state.open_sections[g] == true
+				table.insert(rows, el("button", "arch-head", "sec-" .. g, {
+					text = GR.TITLE[g] .. " (" .. n .. ")",
+					attrs = { ["data-open"] = if expanded then "true" else "false" },
+					actions = { click = "sec=" .. g },
+				}))
+				if expanded then
+					for _, t in GR.shown(state, g) do
+						table.insert(rows, row_view(state, t, live, lifted, pos))
+					end
 				end
 			end
 		end
@@ -4048,7 +4342,7 @@ local function bulk_view(state: State, ids: { string }): Node
 	for _, id in ids do
 		local t = todo_by_id(state, id)
 		if t then
-			local g = group_of(t)
+			local g = if t.archived then 3 elseif t.done then 2 else 1
 			counts[g] += 1
 			if not t.done then
 				all_done = false
@@ -4091,37 +4385,113 @@ local function bulk_view(state: State, ids: { string }): Node
 	})
 end
 
--- The settings sheet: Tern's picker sheet (as the project/model/chat popovers use) with one
--- card row per setting: label, switch badge, one-line description. No query, so no search.
-local function settings_node(state: State): Node
-	local items: { any } = {}
-	local order: { any } = {}
+-- The rows of the settings sheet: the switches (plus a "Groups" row that opens the groups
+-- page), or on the groups page one row per group in display order.
+type SheetRow = { id: string, label: string, detail: string, badge: string?, tone: string? }
+
+function GR.sheet_rows(state: State): { SheetRow }
+	local rows: { SheetRow } = {}
+	if state.settings_page == "groups" then
+		local order = state.groups.order
+		for i, g in order do
+			local mode = state.groups.mode[g]
+			table.insert(rows, {
+				id = g,
+				label = GR.TITLE[g],
+				detail = (if mode then GR.LABEL[mode] else "Main list") .. " · position " .. i .. " of " .. #order .. ". " .. (if mode then GR.HINT[mode] else "Always a tab."),
+			})
+		end
+		return rows
+	end
 	for _, s in SETTINGS do
 		local on = state.cfg[s.id] == true
-		table.insert(items, {
+		table.insert(rows, {
 			id = s.id,
 			label = s.label,
 			detail = s.hint,
-			badges = { { text = if on then "On" else "Off", tone = if on then "success" else "muted" } },
+			badge = if on then "On" else "Off",
 			tone = if on then "success" else "muted",
 		})
-		table.insert(order, s.id)
 	end
+	table.insert(rows, {
+		id = "groups",
+		label = "Groups ›",
+		detail = "Order and display of Tasks, Backlog, Done and Archived. Enter opens the page.",
+	})
+	return rows
+end
+
+function GR.sheet_row(state: State): SheetRow
+	local rows = GR.sheet_rows(state)
+	return rows[math.clamp(state.settings_sel, 1, #rows)]
+end
+
+-- Space, Enter or a click on a row: flips a switch, opens the groups page, or on that page
+-- steps the group's display mode.
+function GR.sheet_activate(state: State, id: string)
+	if state.settings_page == "groups" then
+		GR.cycle(state, id)
+	elseif id == "groups" then
+		state.settings_page = "groups"
+		state.settings_sel = 1
+	else
+		toggle_setting(state, id)
+	end
+end
+
+-- Moves the selected group one place up (-1) or down (1); the selection follows it.
+function GR.sheet_move(state: State, delta: number)
+	local id = GR.sheet_row(state).id
+	GR.move(state, id, delta)
+	state.settings_sel = table.find(state.groups.order, id) or state.settings_sel
+end
+
+-- Esc and the Back button: the groups page returns to the main page, the main page closes.
+function GR.sheet_back(state: State)
+	if state.settings_page == "groups" then
+		state.settings_page = "main"
+		state.settings_sel = #SETTINGS + 1
+	else
+		state.settings_open = false
+	end
+end
+
+-- The settings sheet: Tern's picker sheet (as the project/model/chat popovers use) with one
+-- card row per setting: label, badge, one-line description. No query, so no search.
+local function settings_node(state: State): Node
+	local rows = GR.sheet_rows(state)
+	local items: { any } = {}
+	local order: { any } = {}
+	for _, row in rows do
+		local item: { [string]: any } = { id = row.id, label = row.label, detail = row.detail }
+		if row.badge then
+			item.badges = { { text = row.badge, tone = row.tone } }
+			item.tone = row.tone
+		end
+		table.insert(items, item)
+		table.insert(order, row.id)
+	end
+	local groups_page = state.settings_page == "groups"
+	local actions: { any } = {
+		{ id = "settings-toggle", label = if groups_page then "Change view" else "Toggle", keys = { "space" } },
+	}
+	if groups_page then
+		table.insert(actions, { id = "settings-up", label = "Move up", keys = { "shift+up" } })
+		table.insert(actions, { id = "settings-down", label = "Move down", keys = { "shift+down" } })
+	end
+	table.insert(actions, { id = "settings-close", label = if groups_page then "Back" else "Close", keys = { "esc" }, primary = true })
 	return ui.node("picker", {
 		key = "settings",
 		role = ROLE .. "settings",
 		size = "md",
-		layout = "cards",
+		layout = if groups_page then "list" else "cards",
 		preview = "none",
-		title = "Settings",
-		noun = "settings",
+		title = if groups_page then "Groups" else "Settings",
+		noun = if groups_page then "groups" else "settings",
 		items = items,
 		order = order,
-		selected = SETTINGS[math.clamp(state.settings_sel, 1, #SETTINGS)].id,
-		actions = {
-			{ id = "settings-toggle", label = "Toggle", keys = { "space" } },
-			{ id = "settings-close", label = "Close", keys = { "esc" }, primary = true },
-		},
+		selected = GR.sheet_row(state).id,
+		actions = actions,
 	})
 end
 
@@ -4131,9 +4501,13 @@ local function settings_key(state: State, key: Key): boolean
 		return false
 	end
 	local k = key.text or key.name
-	local n = #SETTINGS
-	if key.name == "escape" or k == "," then
+	local n = #GR.sheet_rows(state)
+	if key.name == "escape" then
+		GR.sheet_back(state)
+	elseif k == "," then
 		state.settings_open = false
+	elseif key.shift and state.settings_page == "groups" and (key.name == "up" or key.name == "down") then
+		GR.sheet_move(state, if key.name == "up" then -1 else 1)
 	elseif key.name == "up" or k == "k" then
 		state.settings_sel = math.max(1, state.settings_sel - 1)
 	elseif key.name == "down" or k == "j" then
@@ -4143,7 +4517,7 @@ local function settings_key(state: State, key: Key): boolean
 	elseif key.name == "end" then
 		state.settings_sel = n
 	elseif key.name == "space" or k == " " or key.name == "enter" then
-		toggle_setting(state, SETTINGS[math.clamp(state.settings_sel, 1, n)].id)
+		GR.sheet_activate(state, GR.sheet_row(state).id)
 	end
 	return true
 end
@@ -4228,8 +4602,8 @@ tern.block.define("list", {
 			since = {},
 			nudge_seen = 0,
 			launched = {},
-			arch_open = false,
-			done_open = false,
+			groups = GR.read(),
+			open_sections = {},
 			tab = "tasks",
 			confirm = nil,
 			confirm_timer = nil,
@@ -4242,6 +4616,7 @@ tern.block.define("list", {
 			closing = {},
 			cfg = read_settings(),
 			settings_open = false,
+			settings_page = "main",
 			settings_sel = 1,
 			settings_tap = nil,
 			sess_mtime = {},
@@ -4276,7 +4651,7 @@ tern.block.define("list", {
 
 	features = { "edit", "undo" },
 	title = function(state: State): string?
-		return "Tasks (" .. open_count(state) .. ")"
+		return "Tasks (" .. GR.open(state, "tasks") .. ")"
 	end,
 
 	view = function(state: State, _cx: BlockCx): BlockView
@@ -4411,9 +4786,9 @@ tern.block.define("list", {
 				backlog_toggle(state, t)
 			end
 		elseif k == "B" then
-			switch_tab(state, if state.tab == "backlog" then "tasks" else "backlog")
+			GR.reveal(state, "backlog")
 		elseif k == "Z" then
-			toggle_archived(state)
+			GR.reveal(state, "archived")
 		elseif key.name == "delete" or key.name == "backspace" then
 			delete_press(state)
 		elseif key.name == "escape" and (state.confirm or state.confirm_bulk or state.lift or next(state.sel) ~= nil) then
@@ -4460,22 +4835,29 @@ tern.block.define("list", {
 		end
 		if state.settings_open then
 			if (ev.ev == "select" or ev.ev == "activate") and type(ev.item) == "string" then
-				for i, s in SETTINGS do
-					if s.id == ev.item then
+				for i, row in GR.sheet_rows(state) do
+					if row.id == ev.item then
 						state.settings_sel = i
 						local now = tern.now()
 						local tap = state.settings_tap
-						state.settings_tap = { id = s.id, at = now }
-						-- A double click delivers select then activate: it flips once.
-						if ev.ev == "select" or not (tap and tap.id == s.id and now - tap.at < TAP_MS) then
-							toggle_setting(state, s.id)
+						state.settings_tap = { id = row.id, at = now }
+						-- A double click delivers select then activate: it acts once.
+						if ev.ev == "select" or not (tap and tap.id == row.id and now - tap.at < TAP_MS) then
+							GR.sheet_activate(state, row.id)
 						end
+						break
 					end
 				end
 			elseif ev.ev == "action" then
 				if ev.act == "settings-toggle" then
-					toggle_setting(state, SETTINGS[math.clamp(state.settings_sel, 1, #SETTINGS)].id)
-				elseif ev.act == "settings-close" or ev.act == "close" then
+					GR.sheet_activate(state, GR.sheet_row(state).id)
+				elseif ev.act == "settings-up" then
+					GR.sheet_move(state, -1)
+				elseif ev.act == "settings-down" then
+					GR.sheet_move(state, 1)
+				elseif ev.act == "settings-close" then
+					GR.sheet_back(state)
+				elseif ev.act == "close" then
 					state.settings_open = false
 				end
 			end
@@ -4577,6 +4959,9 @@ tern.block.define("list", {
 			end
 		elseif act == "open" and type(value) == "string" then
 			-- Double click: select the row, open its card, then do what Enter does.
+			if state.tap and state.tap.key == "deleted" and tern.now() - state.tap.at < TAP_MS then
+				return
+			end
 			if state.focus then
 				state.pick = nil
 				set_focus(state, nil)
@@ -4615,6 +5000,8 @@ tern.block.define("list", {
 					archive_toggle(state, target)
 				else
 					delete_one(state, target)
+					-- The double click's trailing dblclick lands on whichever row took this one's place.
+					state.tap = { key = "deleted", at = tern.now() }
 				end
 			end
 		elseif act == "settings" then
@@ -4668,7 +5055,7 @@ tern.block.define("list", {
 			close_picker(state)
 		elseif act == "pick-use" and state.pick then
 			picker_key(state, { name = "enter" } :: any)
-		elseif act == "tab" and (value == "tasks" or value == "backlog") then
+		elseif act == "tab" and type(value) == "string" and GR.is_tab(state.groups, value) then
 			switch_tab(state, value)
 		elseif act == "rdone" and type(value) == "string" then
 			if repeated(state, "rdone=" .. value) then
@@ -4686,10 +5073,8 @@ tern.block.define("list", {
 					backlog_toggle(state, candidate)
 				end
 			end
-		elseif act == "donehead" then
-			toggle_done_open(state)
-		elseif act == "arch" then
-			toggle_archived(state)
+		elseif act == "sec" and type(value) == "string" then
+			GR.toggle_section(state, value)
 		elseif act == "bulk" then
 			bulk_action(state, value)
 		end

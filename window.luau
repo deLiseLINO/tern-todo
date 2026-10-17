@@ -370,6 +370,72 @@ tern.timer(300, function(_cx)
 	arm()
 end)
 
+-- Pane relay for the split setting. The host half cannot reach the layout, so it writes
+--   host   -> "pane_req": { n, park = pane?, show = pane? }
+--   window -> "pane_ack": { n, ok }
+-- and this half parks `park` (its program keeps running) and deals `show` out of the park
+-- pile beside the focused block, with no tab or split created. Polled while "watch" is fresh.
+local REQ_MS = 120
+local WATCH_FRESH_S = 15
+local req_armed = false
+local req_done = 0
+
+local function relay(cx: WindowCx)
+	local ok, watch = pcall(tern.kv.get, "watch")
+	if not ok or type(watch) ~= "number" or os.time() - watch > WATCH_FRESH_S then
+		return
+	end
+	local rok, req = pcall(tern.kv.get, "pane_req")
+	if not rok or type(req) ~= "table" or type(req.n) ~= "number" or req.n == req_done then
+		return
+	end
+	req_done = req.n
+	local good = true
+	if type(req.park) == "number" then
+		local pok, parked = pcall(function()
+			return cx.layout:park(req.park)
+		end)
+		good = pok and parked == true
+	end
+	if type(req.show) == "number" then
+		local uok, shown = pcall(function()
+			return cx.layout:unpark(req.show)
+		end)
+		good = uok and shown == true
+	end
+	pcall(tern.kv.set, "pane_ack", { n = req.n, ok = good })
+end
+
+local function arm_relay()
+	if req_armed then
+		return
+	end
+	req_armed = true
+	tern.timer(REQ_MS, function(cx)
+		req_armed = false
+		if cx then
+			pcall(relay, cx)
+		end
+		arm_relay()
+	end)
+end
+
+tern.on("window_start", function(_cx)
+	arm_relay()
+end)
+
+tern.timer(300, function(_cx)
+	arm_relay()
+end)
+local tern_bin = require("./executable").tern_bin
+local FILE_KEY = "todo-proto.file"
+local NUDGE_KEY = "todo-proto.nudge"
+local session_tasks = require("./session-tasks")
+local edit_file = session_tasks.edit_file
+local add_task = session_tasks.add_task
+local strip_glyph = session_tasks.strip_glyph
+local iso_now = session_tasks.iso_now
+local is_text = session_tasks.is_text
 tern.command({
 	id = "add-omp-session",
 	title = "Todo: add this omp session to tasks",
@@ -400,3 +466,4 @@ tern.command({
 	icon = "check",
 	run = open_settings,
 })
+
