@@ -767,9 +767,24 @@
 	& [data-role='todo-proto.buttons'] {
 		display: flex;
 		flex-direction: row;
+		/* Two pills at their natural width overflow a narrow detail card, and
+		   justify-content: flex-end pushes that overflow out the LEFT edge, where the
+		   first button appears to cross the card's boundary. Wrapping keeps the row
+		   inside the card at any width, and changes nothing while there is room. */
+		flex-wrap: wrap;
 		justify-content: flex-end;
 		gap: 10px;
 		margin-top: 18px;
+	}
+
+	/* A single pill wider than the card would still spill, so let each one shrink
+	   and ellipsize instead of overflowing. */
+	& [data-role='todo-proto.buttons'] [data-role='todo-proto.pill'] {
+		min-width: 0;
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	& [data-role='todo-proto.level-ic'] {
